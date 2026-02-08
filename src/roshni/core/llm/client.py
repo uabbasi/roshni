@@ -77,106 +77,139 @@ class LLMClient:
     # Public API
     # ------------------------------------------------------------------
 
-    def chat(self, message: str, stop: list[str] | None = None, **kwargs: Any) -> tuple[str, float]:
-        """Send a message and return (response_text, elapsed_seconds).
+    def completion(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        stop: list[str] | None = None,
+    ) -> Any:
+        """Low-level completion call with budget checking and usage recording.
 
-        Respects token budget, maintains conversation history, and
-        records token usage.
+        Checks token budget, calls litellm.completion(), and records
+        token usage.  Does NOT manage conversation history — the caller
+        is responsible for that.
+
+        Args:
+            messages: Full messages list (system + history + user).
+            tools: Optional tool schemas in OpenAI function-calling format.
+            stop: Optional stop sequences.
+
+        Returns:
+            The raw litellm response object.
+
+        Raises:
+            ImportError: If litellm is not installed.
+            RuntimeError: If the daily token budget is exceeded.
         """
         try:
             import litellm
         except ImportError:
             raise ImportError("Install LLM support with: pip install roshni[llm]")
 
+        within_budget, remaining = check_budget()
+        if not within_budget:
+            logger.warning(f"Daily token budget exceeded ({remaining} remaining)")
+            raise RuntimeError("Daily token budget exceeded. Try again tomorrow.")
+
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "timeout": self.timeout,
+            "num_retries": self.num_retries,
+        }
+        if tools:
+            kwargs["tools"] = tools
+        if stop:
+            kwargs["stop"] = stop
+
+        response = litellm.completion(**kwargs)
+        self._record_response_usage(response)
+        return response
+
+    async def acompletion(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        stop: list[str] | None = None,
+    ) -> Any:
+        """Async version of completion()."""
+        try:
+            import litellm
+        except ImportError:
+            raise ImportError("Install LLM support with: pip install roshni[llm]")
+
+        within_budget, remaining = check_budget()
+        if not within_budget:
+            logger.warning(f"Daily token budget exceeded ({remaining} remaining)")
+            raise RuntimeError("Daily token budget exceeded. Try again tomorrow.")
+
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "timeout": self.timeout,
+            "num_retries": self.num_retries,
+        }
+        if tools:
+            kwargs["tools"] = tools
+        if stop:
+            kwargs["stop"] = stop
+
+        response = await litellm.acompletion(**kwargs)
+        self._record_response_usage(response)
+        return response
+
+    def chat(self, message: str, stop: list[str] | None = None, **kwargs: Any) -> tuple[str, float]:
+        """Send a message and return (response_text, elapsed_seconds).
+
+        Respects token budget, maintains conversation history, and
+        records token usage.
+        """
         start = time()
 
         if not message:
             return "Input message is empty.", 0.0
 
-        within_budget, remaining = check_budget()
-        if not within_budget:
-            logger.warning(f"Daily token budget exceeded ({remaining} remaining)")
-            return "Daily token budget exceeded. Try again tomorrow.", 0.0
-
-        # Build messages list
         messages = self._build_messages(message, **kwargs)
 
         try:
-            response = litellm.completion(
-                model=self.model,
-                messages=messages,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                stop=stop,
-                timeout=self.timeout,
-                num_retries=self.num_retries,
-            )
+            response = self.completion(messages, stop=stop)
 
-            # Extract text
             content = response.choices[0].message.content or ""
             text = extract_text_from_response(content)
 
-            # Record token usage
-            usage = getattr(response, "usage", None)
-            if usage:
-                record_usage(
-                    input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-                    output_tokens=getattr(usage, "completion_tokens", 0) or 0,
-                    provider=self.provider,
-                    model=self.model,
-                )
-
-            # Update history
             self.message_history.append({"role": "user", "content": message})
             if text.strip():
                 self.message_history.append({"role": "assistant", "content": text})
 
             return text, time() - start
 
+        except RuntimeError as e:
+            # Budget exceeded
+            return str(e), 0.0
         except Exception as e:
             logger.error(f"LLM error ({type(e).__name__}): {e}")
             return f"An error occurred while processing your request: {e!s}", time() - start
 
     async def achat(self, message: str, stop: list[str] | None = None, **kwargs: Any) -> tuple[str, float]:
         """Async version of chat()."""
-        try:
-            import litellm
-        except ImportError:
-            raise ImportError("Install LLM support with: pip install roshni[llm]")
-
         start = time()
 
         if not message:
             return "Input message is empty.", 0.0
 
-        within_budget, _remaining = check_budget()
-        if not within_budget:
-            return "Daily token budget exceeded. Try again tomorrow.", 0.0
-
         messages = self._build_messages(message, **kwargs)
 
         try:
-            response = await litellm.acompletion(
-                model=self.model,
-                messages=messages,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                stop=stop,
-                timeout=self.timeout,
-                num_retries=self.num_retries,
-            )
+            response = await self.acompletion(messages, stop=stop)
 
             content = response.choices[0].message.content or ""
             text = extract_text_from_response(content)
-
-            usage = getattr(response, "usage", None)
-            if usage:
-                record_usage(
-                    input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-                    output_tokens=getattr(usage, "completion_tokens", 0) or 0,
-                    provider=self.provider,
-                    model=self.model,
-                )
 
             self.message_history.append({"role": "user", "content": message})
             if text.strip():
@@ -184,6 +217,8 @@ class LLMClient:
 
             return text, time() - start
 
+        except RuntimeError as e:
+            return str(e), 0.0
         except Exception as e:
             logger.error(f"LLM error ({type(e).__name__}): {e}")
             return f"An error occurred while processing your request: {e!s}", time() - start
@@ -208,6 +243,17 @@ class LLMClient:
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
+
+    def _record_response_usage(self, response: Any) -> None:
+        """Record token usage from a litellm response."""
+        usage = getattr(response, "usage", None)
+        if usage:
+            record_usage(
+                input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+                output_tokens=getattr(usage, "completion_tokens", 0) or 0,
+                provider=self.provider,
+                model=self.model,
+            )
 
     def _build_messages(self, message: str, **kwargs: Any) -> list[dict[str, str]]:
         messages: list[dict[str, str]] = []

@@ -2,124 +2,111 @@
 
 > *roshni* (روشنی) — "light" in Urdu
 
-Personal data infrastructure framework for health tracking, financial planning, journal search, and AI agents.
+Your personal AI assistant on Telegram.
 
-## Install
+## Get Started
 
-```bash
-pip install roshni                    # Core only (config, secrets, caching)
-pip install roshni[health]            # + Health data collection framework
-pip install roshni[fitbit]            # + Fitbit collector
-pip install roshni[journal-faiss]     # + Journal RAG with FAISS
-pip install roshni[financial-full]    # + Financial calculators + market data
-pip install roshni[all]               # Everything
-```
+You need Python 3.11+ installed.
 
-## Modules
+### 1. Install
 
-| Module | What it does | Optional dep |
+    pip install "roshni[bot]"
+
+### 2. Set Up
+
+    roshni init
+
+The wizard walks you through everything:
+- Pick an AI provider (Anthropic, OpenAI, or Google)
+- Create a Telegram bot (instructions included)
+- Give your bot a personality
+- Connect your services (Gmail, Obsidian)
+
+### 3. Run
+
+    roshni run
+
+Open Telegram and message your bot.
+
+### Try it in the terminal first
+
+    roshni chat
+
+No Telegram setup needed — just chat in your terminal.
+
+## What Your Bot Can Do
+
+- **Chat** — Ask anything, get thoughtful responses
+- **Email** — "Send an email to Sarah about the meeting tomorrow"
+- **Notes** — "Remember that the plumber is coming Thursday"
+- **Search your notes** — "What did I write about the trip to Japan?"
+
+## Services
+
+| Service | What it does | Setup |
+|---------|-------------|-------|
+| Gmail | Send emails on your behalf | Google App Password |
+| Obsidian | Search your vault | Point to the folder |
+| Notes | Save and recall quick notes | Built-in, no setup |
+
+*Coming soon: Google Calendar, Trello*
+
+## Commands
+
+In Telegram, just type normally. Your bot also understands:
+- `/help` — see what your bot can do
+- `/clear` — start a fresh conversation
+
+## Reconfigure
+
+    roshni init     # re-run the wizard anytime
+
+## Framework
+
+Roshni is also a modular Python framework you can build on. Each module is self-contained:
+
+| Module | What it does | Install with |
 |--------|-------------|--------------|
-| `core` | Config, secrets, caching, storage, LLM abstraction | *(included)* |
-| `health` | Health data collection protocol + ETL base | `health` |
-| `financial` | Mortgage, zakat, tax calculators, market data | `financial` / `financial-full` |
-| `journal` | RAG-based journal search (chunking, embeddings, retrieval) | `journal-faiss` / `journal-chroma` |
-| `agent` | AI agent framework (base agent, router, circuit breaker) | `agent` |
-| `gateway` | Messaging gateway (Telegram bot framework) | `gateway-telegram` |
-| `integrations` | Google Sheets, Drive, Gmail, Cloud Storage wrappers | `google` |
+| **core** | Config, secrets, caching, storage, LLM helpers | *(always included)* |
+| **financial** | Mortgage, zakat, tax, and life-event calculators | `roshni[financial]` |
+| **health** | Health data collection framework + Fitbit plugin | `roshni[health]` or `roshni[fitbit]` |
+| **journal** | Search your journal entries with AI (embeddings + RAG) | `roshni[journal-faiss]` |
+| **agent** | Build AI agents with tool calling and routing | `roshni[agent]` |
+| **gateway** | Connect agents to Telegram (or other platforms) | `roshni[gateway-telegram]` |
+| **integrations** | Google Sheets, Drive, Gmail, Cloud Storage wrappers | `roshni[google]` |
 
-## Quick Start
+<details>
+<summary>Full list of optional extras</summary>
 
-### Configuration
+| Extra | What it adds |
+|-------|-------------|
+| `bot` | Agent + Telegram gateway (everything you need for `roshni run`) |
+| `health` | pandas, requests — health collection base |
+| `fitbit` | Fitbit API collector (includes `health`) |
+| `journal` | sentence-transformers, scikit-learn — embedding engine |
+| `journal-faiss` | FAISS vector search (includes `journal`) |
+| `journal-chroma` | ChromaDB vector search (includes `journal`) |
+| `financial` | pandas — financial data analysis |
+| `financial-full` | yfinance, duckdb, cvxpy — market data + portfolio optimization |
+| `llm` | litellm — multi-provider LLM client |
+| `agent` | AI agent framework (includes `llm`) |
+| `agent-langchain` | LangChain integration (includes `agent`) |
+| `gateway-telegram` | Telegram bot gateway |
+| `google` | Google Sheets, Drive, Gmail, Cloud Storage |
+| `storage-gcs` | Google Cloud Storage backend |
+| `all` | Everything above |
 
-```python
-from roshni.core.config import Config
-
-config = Config(
-    config_file="config/config.yaml",
-    env_prefix="MYAPP_",
-    data_dir="~/.myapp-data",
-)
-
-print(config.get("llm.provider"))
-```
-
-### Secrets Management
-
-```python
-from roshni.core.secrets import SecretsManager, EnvProvider, YamlFileProvider
-
-manager = SecretsManager(providers=[
-    EnvProvider("MYAPP_"),
-    YamlFileProvider("~/.myapp/secrets.yaml"),
-])
-
-api_key = manager.get("trello.api_key")
-all_trello = manager.get_namespace("trello")
-```
-
-### Financial Calculators
-
-```python
-from roshni.financial.calculators import MortgageTerms, calculate_monthly_payment
-
-terms = MortgageTerms(
-    balance=500_000,
-    current_rate=0.065,
-    is_interest_only=False,
-    remaining_term_years=30,
-)
-
-payment = calculate_monthly_payment(terms)
-```
-
-### Health Data Collection
-
-```python
-from roshni.health.collector import HealthCollector, BaseCollector
-from roshni.health.models import DailyHealth
-
-class MyCollector(BaseCollector):
-    name = "my_tracker"
-
-    def collect(self, start_date, end_date):
-        # Fetch from your data source
-        return [DailyHealth(date=start_date, steps=10000, sleep_hours=7.5)]
-```
-
-## Optional Dependencies
-
-| Extra | Installs | Use case |
-|-------|----------|----------|
-| `health` | pandas, requests | Health data pipelines |
-| `fitbit` | fitbit, requests-oauthlib | Fitbit API collector |
-| `journal` | sentence-transformers, scikit-learn | Journal embeddings + search |
-| `journal-faiss` | faiss-cpu | FAISS vector backend |
-| `journal-chroma` | chromadb | ChromaDB vector backend |
-| `financial` | pandas | Financial data analysis |
-| `financial-full` | yfinance, duckdb, cvxpy | Market data + portfolio optimization |
-| `llm` | litellm | Multi-provider LLM abstraction |
-| `agent` | litellm | AI agent framework |
-| `agent-langchain` | langchain, langchain-core | LangChain agent integration |
-| `gateway-telegram` | python-telegram-bot, apscheduler | Telegram bot gateway |
-| `google` | gspread, google-api-python-client, etc. | Google API integrations |
-| `storage-gcs` | google-cloud-storage | GCS storage backend |
+</details>
 
 ## Development
 
-```bash
-git clone https://github.com/uabbasi/roshni.git
-cd roshni
-uv sync --extra dev
+For developers extending roshni:
 
-# Run tests
-uv run pytest tests/
+    git clone https://github.com/uabbasi/roshni.git
+    cd roshni && uv sync --extra dev
+    uv run pytest tests/
 
-# Lint + format
-uv run ruff check . --fix && uv run ruff format .
-
-# Type check
-uv run mypy src/roshni/
-```
+See [CLAUDE.md](CLAUDE.md) for architecture details.
 
 ## License
 

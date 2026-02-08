@@ -21,6 +21,8 @@ dependencies = [
     "loguru>=0.7",
     "python-dotenv>=0.21",
     "aiofiles>=23.2",
+    "click>=8.0",
+    "rich>=13.0",
 ]
 
 [project.optional-dependencies]
@@ -35,6 +37,7 @@ llm = ["litellm>=1.60"]
 agent = ["roshni[llm]"]
 agent-langchain = ["roshni[agent]", "langchain>=0.3", "langchain-core>=1.2"]
 gateway-telegram = ["python-telegram-bot>=21.0", "apscheduler>=3.10"]
+bot = ["roshni[agent]", "roshni[gateway-telegram]"]
 google = [
     "gspread>=6.1",
     "gspread-dataframe>=4.0",
@@ -47,10 +50,8 @@ all = [
     "roshni[fitbit]",
     "roshni[journal-faiss]",
     "roshni[financial-full]",
-    "roshni[llm]",
-    "roshni[agent]",
+    "roshni[bot]",
     "roshni[google]",
-    "roshni[gateway-telegram]",
 ]
 dev = [
     "pytest>=8.3",
@@ -60,6 +61,9 @@ dev = [
     "mypy>=1.11",
     "roshni[google,health,journal,financial]",
 ]
+
+[project.scripts]
+roshni = "roshni.core.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/uabbasi/roshni"
