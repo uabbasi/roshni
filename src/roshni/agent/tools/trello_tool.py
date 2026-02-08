@@ -54,9 +54,7 @@ def _fmt_cards(items: list[dict[str, Any]]) -> str:
     for c in items:
         due = c.get("due") or "none"
         labels = ", ".join(
-            lbl.get("name") or lbl.get("color", "")
-            for lbl in c.get("labels", [])
-            if isinstance(lbl, dict)
+            lbl.get("name") or lbl.get("color", "") for lbl in c.get("labels", []) if isinstance(lbl, dict)
         )
         labels = labels or "none"
         lines.append(

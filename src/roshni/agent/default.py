@@ -381,9 +381,7 @@ class DefaultAgent(BaseAgent):
     # Message building
     # ------------------------------------------------------------------
 
-    def _build_messages(
-        self, *, mode: str | None = None, clear_history: bool = False
-    ) -> list[dict[str, Any]]:
+    def _build_messages(self, *, mode: str | None = None, clear_history: bool = False) -> list[dict[str, Any]]:
         """Build the messages list with system prompt, memory, and trimmed history.
 
         Args:

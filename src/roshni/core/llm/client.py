@@ -312,9 +312,7 @@ class LLMClient:
         self._record_response_usage(response, provider=self.fallback_provider, model=self.fallback_model)
         return response
 
-    def _record_response_usage(
-        self, response: Any, *, provider: str | None = None, model: str | None = None
-    ) -> None:
+    def _record_response_usage(self, response: Any, *, provider: str | None = None, model: str | None = None) -> None:
         """Record token usage from a litellm response, including cache metrics."""
         usage = getattr(response, "usage", None)
         if usage:

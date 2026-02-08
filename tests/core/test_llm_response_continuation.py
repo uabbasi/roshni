@@ -156,9 +156,7 @@ class TestResponseContinuationMixin:
                 return "The analysis shows that the data indicates the", 0.5
             else:
                 # Continuation must exceed min_continuation_growth (50 chars)
-                return (
-                    "results are fully consistent with our original hypothesis and expectations."
-                ), 0.3
+                return ("results are fully consistent with our original hypothesis and expectations."), 0.3
 
         result = orchestrator.generate_with_continuation(
             initial_prompt="Analyze the data.",

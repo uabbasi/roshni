@@ -36,9 +36,11 @@ def test_init_requires_credentials():
 
 @patch("roshni.integrations.trello.urllib.request.urlopen")
 def test_list_boards(mock_urlopen):
-    mock_urlopen.return_value = _DummyResp([
-        {"id": "b1", "name": "Board 1", "closed": False},
-    ])
+    mock_urlopen.return_value = _DummyResp(
+        [
+            {"id": "b1", "name": "Board 1", "closed": False},
+        ]
+    )
 
     client = TrelloClient(api_key="k", token="t")
     boards = client.list_boards()

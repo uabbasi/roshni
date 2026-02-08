@@ -73,9 +73,8 @@ def _web_search(query: str, limit: int = 5) -> str:
     if not q:
         return "Please provide a search query."
 
-    url = (
-        "https://api.duckduckgo.com/?"
-        + urllib.parse.urlencode({"q": q, "format": "json", "no_redirect": "1", "no_html": "1", "skip_disambig": "1"})
+    url = "https://api.duckduckgo.com/?" + urllib.parse.urlencode(
+        {"q": q, "format": "json", "no_redirect": "1", "no_html": "1", "skip_disambig": "1"}
     )
     try:
         data = json.loads(_http_get(url).decode("utf-8", errors="ignore"))

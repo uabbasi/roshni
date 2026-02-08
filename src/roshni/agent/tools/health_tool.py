@@ -97,8 +97,7 @@ def create_health_tools(export_path: str) -> list[ToolDefinition]:
         ToolDefinition(
             name="get_health_summary",
             description=(
-                "Get a daily summary from Apple Health export data for a date or date range. "
-                "Dates must be YYYY-MM-DD."
+                "Get a daily summary from Apple Health export data for a date or date range. Dates must be YYYY-MM-DD."
             ),
             parameters={
                 "type": "object",

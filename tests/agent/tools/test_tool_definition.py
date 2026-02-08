@@ -98,9 +98,7 @@ class TestExecuteRetry:
             calls.append(1)
             return x
 
-        tool = ToolDefinition(
-            name="t", description="t", parameters={}, function=fn
-        )
+        tool = ToolDefinition(name="t", description="t", parameters={}, function=fn)
         result = tool.execute({"x": "ok"})
         assert result == "ok"
         assert len(calls) == 1
@@ -115,9 +113,7 @@ class TestExecuteRetry:
                 raise ConnectionError("network blip")
             return "recovered"
 
-        tool = ToolDefinition(
-            name="flaky", description="flaky", parameters={}, function=fn
-        )
+        tool = ToolDefinition(name="flaky", description="flaky", parameters={}, function=fn)
         result = tool.execute({})
         assert result == "recovered"
         assert len(attempts) == 3
@@ -131,9 +127,7 @@ class TestExecuteRetry:
         def fn() -> str:
             raise TimeoutError("always times out")
 
-        tool = ToolDefinition(
-            name="broken", description="broken", parameters={}, function=fn
-        )
+        tool = ToolDefinition(name="broken", description="broken", parameters={}, function=fn)
         result = tool.execute({}, max_attempts=2)
         assert "failed after 2 attempts" in result
         assert mock_sleep.call_count == 1
@@ -145,18 +139,14 @@ class TestExecuteRetry:
             calls.append(1)
             raise ValueError("bad input")
 
-        tool = ToolDefinition(
-            name="bad", description="bad", parameters={}, function=fn
-        )
+        tool = ToolDefinition(name="bad", description="bad", parameters={}, function=fn)
         result = tool.execute({})
         assert "Error executing bad" in result
         assert "bad input" in result
         assert len(calls) == 1  # No retry
 
     def test_json_parse_error(self):
-        tool = ToolDefinition(
-            name="t", description="t", parameters={}, function=lambda: "ok"
-        )
+        tool = ToolDefinition(name="t", description="t", parameters={}, function=lambda: "ok")
         result = tool.execute("not json{{{")
         assert "could not parse" in result
 
@@ -170,9 +160,7 @@ class TestExecuteRetry:
                 raise OSError("disk full")
             return "ok"
 
-        tool = ToolDefinition(
-            name="disk", description="disk", parameters={}, function=fn
-        )
+        tool = ToolDefinition(name="disk", description="disk", parameters={}, function=fn)
         result = tool.execute({})
         assert result == "ok"
         assert len(attempts) == 2
