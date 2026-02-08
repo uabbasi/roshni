@@ -34,20 +34,31 @@ def load_secrets():
 
 
 def set_api_key_env(config, secrets) -> None:
-    """Set the provider's API key as an env var so litellm can find it."""
+    """Set API keys as env vars so litellm can find them.
+
+    Supports both new multi-provider format (llm.api_keys.<provider>)
+    and legacy single-provider format (llm.api_key).
+    """
     import os
 
-    provider = config.get("llm.provider", "openai")
+    from roshni.core.llm.config import PROVIDER_ENV_MAP
+
+    # New format: llm.api_keys.<provider> — set all configured providers
+    api_keys: dict = secrets.get("llm.api_keys", {}) or {}
+    if api_keys:
+        for provider, key in api_keys.items():
+            env_var = PROVIDER_ENV_MAP.get(provider)
+            if env_var and key and env_var not in os.environ:
+                os.environ[env_var] = key
+        return
+
+    # Legacy format: single llm.api_key → infer provider from config
     api_key = secrets.get("llm.api_key", "")
     if not api_key:
         return
 
-    env_var_map = {
-        "anthropic": "ANTHROPIC_API_KEY",
-        "openai": "OPENAI_API_KEY",
-        "gemini": "GEMINI_API_KEY",
-    }
-    env_var = env_var_map.get(provider)
+    provider = config.get("llm.default", "") or config.get("llm.provider", "openai")
+    env_var = PROVIDER_ENV_MAP.get(provider)
     if env_var and env_var not in os.environ:
         os.environ[env_var] = api_key
 

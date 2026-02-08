@@ -137,54 +137,113 @@ def init() -> None:
     except (ValueError, IndexError):
         tone = tone_input if tone_input in tones else default_tone
 
-    # --- LLM provider ---
-    providers = ["anthropic", "openai", "gemini"]
+    # --- LLM providers ---
+    from roshni.core.llm.config import PROVIDER_ENV_MAP
+
+    all_providers = ["anthropic", "openai", "gemini", "deepseek", "xai", "groq", "local"]
     provider_names = {
         "anthropic": "Anthropic (Claude)",
         "openai": "OpenAI (GPT)",
         "gemini": "Google (Gemini)",
+        "deepseek": "DeepSeek",
+        "xai": "xAI (Grok)",
+        "groq": "Groq",
+        "local": "Local (Ollama)",
     }
-    default_provider = existing_config.get("llm", {}).get("provider", "anthropic")
 
-    click.echo("\nWhich AI provider do you want to use?")
-    for i, p in enumerate(providers, 1):
+    # Read existing multi-provider config or legacy format
+    existing_llm = existing_config.get("llm", {})
+    default_provider = existing_llm.get("default", "") or existing_llm.get("provider", "anthropic")
+
+    click.echo("\nWhich AI provider do you want as your default?")
+    for i, p in enumerate(all_providers, 1):
         marker = " (default)" if p == default_provider else ""
         click.echo(f"  {i}. {provider_names[p]}{marker}")
 
-    provider_input = click.prompt("  Choose", default=str(providers.index(default_provider) + 1))
+    default_idx = str(all_providers.index(default_provider) + 1) if default_provider in all_providers else "1"
+    provider_input = click.prompt("  Choose", default=default_idx)
     try:
-        provider = providers[int(provider_input) - 1]
+        provider = all_providers[int(provider_input) - 1]
     except (ValueError, IndexError):
-        provider = provider_input if provider_input in providers else default_provider
+        provider = provider_input if provider_input in all_providers else default_provider
 
-    # --- API key ---
-    existing_key = existing_secrets.get("llm", {}).get("api_key", "")
-    if existing_key:
-        click.echo(f"\nAPI key on file: {_mask_key(existing_key)}")
-        change_key = click.confirm("Change it?", default=False)
-    else:
-        change_key = True
+    # --- API keys (multi-provider) ---
+    # Read existing keys from new or legacy format
+    existing_api_keys: dict = existing_secrets.get("llm", {}).get("api_keys", {}) or {}
+    if not existing_api_keys:
+        legacy_key = existing_secrets.get("llm", {}).get("api_key", "")
+        legacy_provider = existing_llm.get("provider", "")
+        if legacy_key and legacy_provider:
+            existing_api_keys = {legacy_provider: legacy_key}
 
-    api_key = existing_key
-    if change_key:
-        env_key_map = {
-            "anthropic": "ANTHROPIC_API_KEY",
-            "openai": "OPENAI_API_KEY",
-            "gemini": "GEMINI_API_KEY",
-        }
-        env_var = env_key_map.get(provider, "")
+    configured_providers: dict[str, str] = {}  # provider -> api_key
+
+    def _prompt_api_key(prov: str, existing: str = "") -> str:
+        """Prompt for an API key for a provider."""
+        if existing:
+            click.echo(f"\n  {provider_names[prov]} key on file: {_mask_key(existing)}")
+            if not click.confirm("  Change it?", default=False):
+                return existing
+
+        env_var = PROVIDER_ENV_MAP.get(prov, "")
         hint = f" (or set {env_var})" if env_var else ""
-        api_key = click.prompt(f"Paste your {provider_names[provider]} API key{hint}", hide_input=True)
+        key = click.prompt(f"  Paste your {provider_names[prov]} API key{hint}", hide_input=True)
 
         click.echo("  Validating...")
-        validation = _validate_api_key(provider, api_key)
+        validation = _validate_api_key(prov, key)
         if validation is True:
             console.print("  [green]Valid![/green]")
         elif validation is None:
-            click.echo("  Skipped (install roshni[llm] to validate)")
+            click.echo("  Skipped (install roshni\\[llm] to validate)")
         else:
             if not click.confirm("  Key validation failed. Use it anyway?", default=False):
                 raise click.Abort()
+        return key
+
+    # Default provider API key (skip for local)
+    if provider != "local":
+        existing_key = existing_api_keys.get(provider, "")
+        configured_providers[provider] = _prompt_api_key(provider, existing_key)
+
+    # --- Fallback provider ---
+    existing_fallback = existing_llm.get("fallback", "")
+    fallback_provider = ""
+    fallback_choices = [p for p in all_providers if p != provider and p != "local"]
+
+    if click.confirm("\nAdd a fallback provider? (used when default fails)", default=bool(existing_fallback)):
+        click.echo("  Choose fallback provider:")
+        for i, p in enumerate(fallback_choices, 1):
+            marker = " (current)" if p == existing_fallback else ""
+            click.echo(f"    {i}. {provider_names[p]}{marker}")
+
+        fb_idx = fallback_choices.index(existing_fallback) + 1 if existing_fallback in fallback_choices else 1
+        fb_default = str(fb_idx)
+        fb_input = click.prompt("    Choose", default=fb_default)
+        try:
+            fallback_provider = fallback_choices[int(fb_input) - 1]
+        except (ValueError, IndexError):
+            fallback_provider = fb_input if fb_input in fallback_choices else ""
+
+        if fallback_provider:
+            existing_fb_key = existing_api_keys.get(fallback_provider, "")
+            configured_providers[fallback_provider] = _prompt_api_key(fallback_provider, existing_fb_key)
+
+    # --- Additional providers ---
+    remaining = [p for p in all_providers if p not in configured_providers and p != "local"]
+    while remaining and click.confirm("\nAdd another provider?", default=False):
+        click.echo("  Available providers:")
+        for i, p in enumerate(remaining, 1):
+            click.echo(f"    {i}. {provider_names[p]}")
+
+        extra_input = click.prompt("    Choose", default="1")
+        try:
+            extra_provider = remaining[int(extra_input) - 1]
+        except (ValueError, IndexError):
+            continue
+
+        existing_extra_key = existing_api_keys.get(extra_provider, "")
+        configured_providers[extra_provider] = _prompt_api_key(extra_provider, existing_extra_key)
+        remaining = [p for p in remaining if p != extra_provider]
 
     # --- Platform ---
     default_platform = existing_config.get("platform", "telegram")
@@ -266,11 +325,27 @@ def init() -> None:
     (ROSHNI_DIR / "notes").mkdir(exist_ok=True)
     (ROSHNI_DIR / "logs").mkdir(exist_ok=True)
 
-    # Config
+    # Config — new multi-provider format
+    from roshni.core.llm.config import get_default_model
+
+    llm_config: dict = {
+        "default": provider,
+    }
+    if fallback_provider:
+        llm_config["fallback"] = fallback_provider
+
+    # Build providers section with default models
+    providers_cfg: dict = {}
+    for prov in configured_providers:
+        providers_cfg[prov] = {"model": get_default_model(prov)}
+    if provider == "local":
+        providers_cfg["local"] = {"model": get_default_model("local")}
+    llm_config["providers"] = providers_cfg
+
     config_data = {
         "bot": {"name": bot_name, "tone": tone},
         "user": {"name": user_name},
-        "llm": {"provider": provider},
+        "llm": llm_config,
         "platform": platform,
         "paths": {
             "data_dir": str(ROSHNI_DIR),
@@ -297,9 +372,9 @@ def init() -> None:
         yaml.dump(config_data, f, default_flow_style=False, sort_keys=False)
     click.echo(f"  Config:  {CONFIG_PATH}")
 
-    # Secrets
+    # Secrets — new multi-provider format
     secrets_data: dict = {
-        "llm": {"api_key": api_key},
+        "llm": {"api_keys": configured_providers} if configured_providers else {},
     }
     if telegram_token:
         secrets_data["telegram"] = {"bot_token": telegram_token}
@@ -331,11 +406,18 @@ def init() -> None:
 
     # Summary
     click.echo("")
+    providers_summary = provider_names[provider]
+    if fallback_provider:
+        providers_summary += f" (fallback: {provider_names[fallback_provider]})"
+    extra = [p for p in configured_providers if p != provider and p != fallback_provider]
+    if extra:
+        providers_summary += f" + {', '.join(provider_names[p] for p in extra)}"
+
     console.print(
         Panel(
             f"Bot name: {bot_name}\n"
             f"Tone: {tone}\n"
-            f"Provider: {provider_names[provider]}\n"
+            f"Provider: {providers_summary}\n"
             f"Platform: {platform}\n"
             f"Gmail: {'enabled' if gmail_enabled else 'disabled'}\n"
             f"Obsidian: {'enabled' if obsidian_enabled else 'disabled'}",

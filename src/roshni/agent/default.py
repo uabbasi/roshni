@@ -59,11 +59,9 @@ class DefaultAgent(BaseAgent):
             resolved_prompt = "You are a helpful personal AI assistant."
 
         # Create LLMClient — single place for model resolution, budget, usage
-        provider = config.get("llm.provider", "openai")
-        model = config.get("llm.model", "") or None
+        llm_kwargs = self._resolve_llm_config(config)
         self._llm = LLMClient(
-            model=model,
-            provider=provider,
+            **llm_kwargs,
             system_prompt=resolved_prompt,
             temperature=temperature,
             max_history_messages=None,  # We manage history ourselves
@@ -225,3 +223,54 @@ class DefaultAgent(BaseAgent):
         """Keep history within bounds."""
         if self.max_history_messages and len(self.message_history) > self.max_history_messages * 2:
             self.message_history = self.message_history[-self.max_history_messages :]
+
+    @staticmethod
+    def _resolve_llm_config(config: Config) -> dict[str, Any]:
+        """Read multi-provider or legacy LLM config into LLMClient kwargs.
+
+        New format (llm.default / llm.providers):
+            llm:
+              default: anthropic
+              fallback: openai
+              providers:
+                anthropic:
+                  model: anthropic/claude-sonnet-4-20250514
+
+        Legacy format (llm.provider / llm.model):
+            llm:
+              provider: openai
+              model: gpt-4o-mini
+        """
+        from roshni.core.llm.config import get_default_model
+
+        # Try new multi-provider format first
+        default_provider = config.get("llm.default", "")
+        if default_provider:
+            providers_cfg: dict = config.get("llm.providers", {}) or {}
+            provider_cfg = providers_cfg.get(default_provider, {}) or {}
+            model = provider_cfg.get("model") or None
+
+            fallback_name = config.get("llm.fallback", "")
+            fallback_model = None
+            fallback_provider = None
+            if fallback_name:
+                fallback_cfg = providers_cfg.get(fallback_name, {}) or {}
+                fallback_model = fallback_cfg.get("model") or get_default_model(fallback_name)
+                fallback_provider = fallback_name
+
+            return {
+                "model": model,
+                "provider": default_provider,
+                "fallback_model": fallback_model,
+                "fallback_provider": fallback_provider,
+            }
+
+        # Legacy single-provider format
+        provider = config.get("llm.provider", "openai")
+        model = config.get("llm.model", "") or None
+        return {
+            "model": model,
+            "provider": provider,
+            "fallback_model": None,
+            "fallback_provider": None,
+        }

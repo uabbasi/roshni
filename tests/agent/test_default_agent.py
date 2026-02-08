@@ -160,6 +160,91 @@ class TestDefaultAgentChat:
         assert tools_arg[0]["function"]["name"] == "echo"
 
 
+class TestDefaultAgentMultiProviderConfig:
+    """Tests for the new multi-provider config format."""
+
+    def test_new_config_format(self, tmp_dir, secrets):
+        config = Config(
+            data_dir=tmp_dir,
+            defaults={
+                "llm": {
+                    "default": "anthropic",
+                    "providers": {
+                        "anthropic": {"model": "anthropic/claude-sonnet-4-20250514"},
+                    },
+                },
+            },
+        )
+        agent = DefaultAgent(config=config, secrets=secrets)
+        assert agent.provider == "anthropic"
+        assert agent.model == "anthropic/claude-sonnet-4-20250514"
+
+    def test_new_config_with_fallback(self, tmp_dir, secrets):
+        config = Config(
+            data_dir=tmp_dir,
+            defaults={
+                "llm": {
+                    "default": "anthropic",
+                    "fallback": "openai",
+                    "providers": {
+                        "anthropic": {"model": "anthropic/claude-sonnet-4-20250514"},
+                        "openai": {"model": "gpt-4o-mini"},
+                    },
+                },
+            },
+        )
+        agent = DefaultAgent(config=config, secrets=secrets)
+        assert agent.provider == "anthropic"
+        assert agent._llm.fallback_model == "gpt-4o-mini"
+        assert agent._llm.fallback_provider == "openai"
+
+    def test_fallback_uses_default_model_when_not_specified(self, tmp_dir, secrets):
+        config = Config(
+            data_dir=tmp_dir,
+            defaults={
+                "llm": {
+                    "default": "anthropic",
+                    "fallback": "deepseek",
+                    "providers": {
+                        "anthropic": {"model": "anthropic/claude-sonnet-4-20250514"},
+                        "deepseek": {},  # no model specified
+                    },
+                },
+            },
+        )
+        agent = DefaultAgent(config=config, secrets=secrets)
+        assert agent._llm.fallback_model == "deepseek/deepseek-chat"
+        assert agent._llm.fallback_provider == "deepseek"
+
+    def test_legacy_config_still_works(self, tmp_dir, secrets):
+        """Old llm.provider format should continue working."""
+        config = Config(
+            data_dir=tmp_dir,
+            defaults={
+                "llm": {"provider": "openai", "model": "gpt-4o-mini"},
+            },
+        )
+        agent = DefaultAgent(config=config, secrets=secrets)
+        assert agent.provider == "openai"
+        assert agent.model == "gpt-4o-mini"
+        assert agent._llm.fallback_model is None
+
+    def test_no_fallback_when_not_configured(self, tmp_dir, secrets):
+        config = Config(
+            data_dir=tmp_dir,
+            defaults={
+                "llm": {
+                    "default": "openai",
+                    "providers": {
+                        "openai": {"model": "gpt-4o-mini"},
+                    },
+                },
+            },
+        )
+        agent = DefaultAgent(config=config, secrets=secrets)
+        assert agent._llm.fallback_model is None
+
+
 class TestDefaultAgentBuildMessages:
     def test_includes_system_prompt(self, config, secrets):
         agent = DefaultAgent(config=config, secrets=secrets, system_prompt="Be helpful.")

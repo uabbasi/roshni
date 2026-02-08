@@ -37,6 +37,8 @@ class LLMClient:
         max_history_messages: int | None = 10,
         timeout: int = 180,
         num_retries: int = 2,
+        fallback_model: str | None = None,
+        fallback_provider: str | None = None,
     ):
         # Resolve model ─ accept either (model=) or (provider=) style
         if model:
@@ -55,6 +57,10 @@ class LLMClient:
         self.max_history_messages = max_history_messages
         self.message_history: list[dict[str, str]] = []
 
+        # Fallback configuration
+        self.fallback_model = fallback_model
+        self.fallback_provider = fallback_provider or (infer_provider(fallback_model) if fallback_model else None)
+
         # Resolve max_tokens
         model_limit = get_model_max_tokens(self.model, self.provider)
         if max_tokens is not None and max_tokens > model_limit:
@@ -72,6 +78,8 @@ class LLMClient:
             self.system_prompt = "You are a helpful AI assistant."
 
         logger.debug(f"LLMClient: model={self.model}  max_tokens={self.max_tokens}")
+        if self.fallback_model:
+            logger.debug(f"LLMClient: fallback={self.fallback_model}")
 
     # ------------------------------------------------------------------
     # Public API
@@ -84,11 +92,13 @@ class LLMClient:
         tools: list[dict[str, Any]] | None = None,
         stop: list[str] | None = None,
     ) -> Any:
-        """Low-level completion call with budget checking and usage recording.
+        """Low-level completion call with budget checking, usage recording, and fallback.
 
         Checks token budget, calls litellm.completion(), and records
-        token usage.  Does NOT manage conversation history — the caller
-        is responsible for that.
+        token usage.  On retryable errors (rate limit, API error, connection),
+        falls back to the fallback model if configured.
+
+        Does NOT manage conversation history — the caller is responsible for that.
 
         Args:
             messages: Full messages list (system + history + user).
@@ -107,27 +117,17 @@ class LLMClient:
         except ImportError:
             raise ImportError("Install LLM support with: pip install roshni[llm]")
 
-        within_budget, remaining = check_budget()
-        if not within_budget:
-            logger.warning(f"Daily token budget exceeded ({remaining} remaining)")
-            raise RuntimeError("Daily token budget exceeded. Try again tomorrow.")
+        self._check_budget()
+        kwargs = self._build_completion_kwargs(messages, tools=tools, stop=stop)
 
-        kwargs: dict[str, Any] = {
-            "model": self.model,
-            "messages": messages,
-            "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
-            "timeout": self.timeout,
-            "num_retries": self.num_retries,
-        }
-        if tools:
-            kwargs["tools"] = tools
-        if stop:
-            kwargs["stop"] = stop
-
-        response = litellm.completion(**kwargs)
-        self._record_response_usage(response)
-        return response
+        try:
+            response = litellm.completion(**kwargs)
+            self._record_response_usage(response)
+            return response
+        except (litellm.RateLimitError, litellm.APIError, litellm.APIConnectionError) as e:
+            if self.fallback_model:
+                return self._fallback_completion(kwargs, e, is_async=False)
+            raise
 
     async def acompletion(
         self,
@@ -136,33 +136,23 @@ class LLMClient:
         tools: list[dict[str, Any]] | None = None,
         stop: list[str] | None = None,
     ) -> Any:
-        """Async version of completion()."""
+        """Async version of completion() with fallback support."""
         try:
             import litellm
         except ImportError:
             raise ImportError("Install LLM support with: pip install roshni[llm]")
 
-        within_budget, remaining = check_budget()
-        if not within_budget:
-            logger.warning(f"Daily token budget exceeded ({remaining} remaining)")
-            raise RuntimeError("Daily token budget exceeded. Try again tomorrow.")
+        self._check_budget()
+        kwargs = self._build_completion_kwargs(messages, tools=tools, stop=stop)
 
-        kwargs: dict[str, Any] = {
-            "model": self.model,
-            "messages": messages,
-            "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
-            "timeout": self.timeout,
-            "num_retries": self.num_retries,
-        }
-        if tools:
-            kwargs["tools"] = tools
-        if stop:
-            kwargs["stop"] = stop
-
-        response = await litellm.acompletion(**kwargs)
-        self._record_response_usage(response)
-        return response
+        try:
+            response = await litellm.acompletion(**kwargs)
+            self._record_response_usage(response)
+            return response
+        except (litellm.RateLimitError, litellm.APIError, litellm.APIConnectionError) as e:
+            if self.fallback_model:
+                return await self._fallback_completion(kwargs, e, is_async=True)
+            raise
 
     def chat(self, message: str, stop: list[str] | None = None, **kwargs: Any) -> tuple[str, float]:
         """Send a message and return (response_text, elapsed_seconds).
@@ -231,7 +221,7 @@ class LLMClient:
         self.message_history = []
 
     def get_config_info(self) -> dict:
-        return {
+        info = {
             "provider": self.provider,
             "model": self.model,
             "max_tokens": self.max_tokens,
@@ -239,20 +229,84 @@ class LLMClient:
             "max_history_messages": self.max_history_messages,
             "history_length": len(self.message_history),
         }
+        if self.fallback_model:
+            info["fallback_model"] = self.fallback_model
+            info["fallback_provider"] = self.fallback_provider
+        return info
 
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
 
-    def _record_response_usage(self, response: Any) -> None:
+    def _check_budget(self) -> None:
+        """Raise RuntimeError if daily token budget is exceeded."""
+        within_budget, remaining = check_budget()
+        if not within_budget:
+            logger.warning(f"Daily token budget exceeded ({remaining} remaining)")
+            raise RuntimeError("Daily token budget exceeded. Try again tomorrow.")
+
+    def _build_completion_kwargs(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        stop: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Build kwargs dict for litellm.completion / acompletion."""
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "timeout": self.timeout,
+            "num_retries": self.num_retries,
+        }
+        if tools:
+            kwargs["tools"] = tools
+        if stop:
+            kwargs["stop"] = stop
+        return kwargs
+
+    def _fallback_completion(self, kwargs: dict[str, Any], original_error: Exception, *, is_async: bool) -> Any:
+        """Retry with the fallback model. Returns response or coroutine."""
+        import litellm
+
+        assert self.fallback_model  # caller checks before calling
+
+        logger.warning(
+            f"Primary model {self.model} failed ({type(original_error).__name__}), "
+            f"falling back to {self.fallback_model}"
+        )
+
+        # Cap max_tokens to fallback model's limit
+        fallback_limit = get_model_max_tokens(self.fallback_model, self.fallback_provider)
+        kwargs["model"] = self.fallback_model
+        kwargs["max_tokens"] = min(kwargs.get("max_tokens", fallback_limit), fallback_limit)
+
+        if is_async:
+            return self._afallback_completion(kwargs, litellm)
+
+        response = litellm.completion(**kwargs)
+        self._record_response_usage(response, provider=self.fallback_provider, model=self.fallback_model)
+        return response
+
+    async def _afallback_completion(self, kwargs: dict[str, Any], litellm: Any) -> Any:
+        """Async fallback completion."""
+        response = await litellm.acompletion(**kwargs)
+        self._record_response_usage(response, provider=self.fallback_provider, model=self.fallback_model)
+        return response
+
+    def _record_response_usage(
+        self, response: Any, *, provider: str | None = None, model: str | None = None
+    ) -> None:
         """Record token usage from a litellm response."""
         usage = getattr(response, "usage", None)
         if usage:
             record_usage(
                 input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
                 output_tokens=getattr(usage, "completion_tokens", 0) or 0,
-                provider=self.provider,
-                model=self.model,
+                provider=provider or self.provider,
+                model=model or self.model,
             )
 
     def _build_messages(self, message: str, **kwargs: Any) -> list[dict[str, str]]:
