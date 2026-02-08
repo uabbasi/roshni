@@ -1,0 +1,119 @@
+[project]
+name = "roshni"
+version = "0.1.0"
+description = "Personal data infrastructure framework — health, finance, journals, and AI agents"
+authors = [{name = "Usman Abbasi", email = "uabbasi@gmail.com"}]
+requires-python = ">=3.11"
+license = "Apache-2.0"
+readme = "README.md"
+keywords = ["personal-data", "health", "finance", "journal", "rag", "agent"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+]
+dependencies = [
+    "PyYAML>=6.0",
+    "loguru>=0.7",
+    "python-dotenv>=0.21",
+    "aiofiles>=23.2",
+]
+
+[project.optional-dependencies]
+health = ["pandas>=2.2", "requests>=2.32"]
+fitbit = ["roshni[health]", "fitbit>=0.3", "requests-oauthlib>=2.0"]
+journal = ["sentence-transformers>=4.0", "scikit-learn>=1.5"]
+journal-faiss = ["roshni[journal]", "faiss-cpu>=1.11"]
+journal-chroma = ["roshni[journal]", "chromadb>=1.0"]
+financial = ["pandas>=2.2"]
+financial-full = ["roshni[financial]", "yfinance>=0.2", "duckdb>=1.4", "cvxpy>=1.6"]
+llm = ["litellm>=1.60"]
+agent = ["roshni[llm]"]
+agent-langchain = ["roshni[agent]", "langchain>=0.3", "langchain-core>=1.2"]
+gateway-telegram = ["python-telegram-bot>=21.0", "apscheduler>=3.10"]
+google = [
+    "gspread>=6.1",
+    "gspread-dataframe>=4.0",
+    "google-api-python-client>=2.123",
+    "google-auth-oauthlib>=1.0",
+    "google-cloud-storage>=2.16",
+]
+storage-gcs = ["google-cloud-storage>=2.16"]
+all = [
+    "roshni[fitbit]",
+    "roshni[journal-faiss]",
+    "roshni[financial-full]",
+    "roshni[llm]",
+    "roshni[agent]",
+    "roshni[google]",
+    "roshni[gateway-telegram]",
+]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=1.1",
+    "pytest-cov>=6.2",
+    "ruff>=0.12",
+    "mypy>=1.11",
+    "roshni[google,health,journal,financial]",
+]
+
+[project.urls]
+Homepage = "https://github.com/uabbasi/roshni"
+Repository = "https://github.com/uabbasi/roshni"
+Issues = "https://github.com/uabbasi/roshni/issues"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/roshni"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "UP",   # pyupgrade
+    "RUF",  # ruff-specific
+]
+ignore = [
+    "E741",
+    "RUF012",
+    "RUF001", "RUF002", "RUF003",
+    "RUF013",
+    "B904",
+    "UP031",
+    "RUF005",
+    "UP030",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["E402"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "smoke: Critical path tests (< 10s)",
+    "integration: External service tests (skipped by default)",
+]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+check_untyped_defs = true
+no_implicit_optional = true
+strict_optional = true
+show_error_codes = true
+pretty = true
+ignore_missing_imports = true
