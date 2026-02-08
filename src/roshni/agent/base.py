@@ -103,6 +103,7 @@ class BaseAgent(ABC):
         message: str,
         *,
         mode: str | None = None,
+        call_type: str | None = None,
         channel: str | None = None,
         max_iterations: int = 5,
         on_tool_start: Callable[[str, int, dict | None], None] | None = None,
@@ -113,6 +114,9 @@ class BaseAgent(ABC):
         Args:
             message: User query.
             mode: Optional mode hint (e.g. from a slash command).
+            call_type: Optional call classification (e.g. ``"heartbeat"``,
+                ``"scheduled"``).  Implementations may use this to adjust
+                behavior such as skipping conversation history.
             channel: Channel identifier (telegram, cli, etc.).
             max_iterations: Max tool-call rounds.
             on_tool_start: Progress callback ``(tool_name, index, args)``.
@@ -126,6 +130,7 @@ class BaseAgent(ABC):
         query: str,
         *,
         mode: str | None = None,
+        call_type: str | None = None,
         channel: str | None = None,
         on_tool_start: Callable[[str, int, dict | None], None] | None = None,
         **kwargs: Any,
@@ -142,6 +147,7 @@ class BaseAgent(ABC):
             lambda: self.chat(
                 query,
                 mode=mode,
+                call_type=call_type,
                 channel=channel,
                 on_tool_start=on_tool_start,
                 **kwargs,

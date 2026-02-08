@@ -70,7 +70,14 @@ def _save(data: dict) -> None:
         raise
 
 
-def record_usage(input_tokens: int, output_tokens: int, provider: str = "", model: str = "") -> None:
+def record_usage(
+    input_tokens: int,
+    output_tokens: int,
+    provider: str = "",
+    model: str = "",
+    cache_creation_tokens: int = 0,
+    cache_read_tokens: int = 0,
+) -> None:
     """Add tokens to today's tally.  Silent on errors."""
     try:
         if not _lock.acquire(timeout=_LOCK_TIMEOUT):
@@ -80,6 +87,8 @@ def record_usage(input_tokens: int, output_tokens: int, provider: str = "", mode
             data["input_tokens"] = data.get("input_tokens", 0) + input_tokens
             data["output_tokens"] = data.get("output_tokens", 0) + output_tokens
             data["calls"] = data.get("calls", 0) + 1
+            data["cache_creation_tokens"] = data.get("cache_creation_tokens", 0) + cache_creation_tokens
+            data["cache_read_tokens"] = data.get("cache_read_tokens", 0) + cache_read_tokens
             _save(data)
         finally:
             _lock.release()
@@ -114,6 +123,10 @@ def get_usage_summary(daily_limit: int | None = None) -> dict:
         finally:
             _lock.release()
         total = data.get("input_tokens", 0) + data.get("output_tokens", 0)
+        cache_creation = data.get("cache_creation_tokens", 0)
+        cache_read = data.get("cache_read_tokens", 0)
+        cache_total = cache_creation + cache_read
+        cache_hit_rate = round(cache_read / cache_total * 100, 1) if cache_total else 0.0
         return {
             "date": data.get("date"),
             "input_tokens": data.get("input_tokens", 0),
@@ -123,6 +136,9 @@ def get_usage_summary(daily_limit: int | None = None) -> dict:
             "daily_limit": limit,
             "remaining": limit - total,
             "pct_used": round(total / limit * 100, 1) if limit else 0,
+            "cache_creation_tokens": cache_creation,
+            "cache_read_tokens": cache_read,
+            "cache_hit_rate": cache_hit_rate,
         }
     except Exception:
         return {}

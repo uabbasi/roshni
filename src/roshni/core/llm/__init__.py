@@ -4,6 +4,7 @@ LLM client and utilities — powered by LiteLLM.
 Requires ``roshni[llm]`` (i.e. ``litellm``).
 """
 
+from .caching import build_cached_system_message, build_system_content_blocks, is_cache_eligible
 from .config import (
     MODEL_CATALOG,
     MODEL_OUTPUT_TOKEN_LIMITS,
@@ -38,7 +39,9 @@ __all__ = [
     "ModelConfig",
     "ModelSelector",
     "ResponseContinuationMixin",
+    "build_cached_system_message",
     "build_continuation_prompt",
+    "build_system_content_blocks",
     "check_budget",
     "estimate_token_count",
     "extract_text_from_response",
@@ -49,6 +52,7 @@ __all__ = [
     "get_model_selector",
     "get_usage_summary",
     "infer_provider",
+    "is_cache_eligible",
     "is_response_truncated",
     "merge_responses",
     "record_usage",

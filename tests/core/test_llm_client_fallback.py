@@ -52,6 +52,10 @@ def _make_response(content="Hello", prompt_tokens=10, completion_tokens=5):
     usage = MagicMock()
     usage.prompt_tokens = prompt_tokens
     usage.completion_tokens = completion_tokens
+    # Explicit cache fields — MagicMock auto-creates attrs, which breaks getattr defaults
+    usage.cache_creation_input_tokens = 0
+    usage.cached_content_token_count = 0
+    usage.prompt_tokens_details = None
     msg = MagicMock()
     msg.content = content
     choice = MagicMock()
@@ -231,4 +235,6 @@ class TestFallbackCompletion:
             output_tokens=5,
             provider="deepseek",
             model="deepseek/deepseek-chat",
+            cache_creation_tokens=0,
+            cache_read_tokens=0,
         )

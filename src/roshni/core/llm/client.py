@@ -256,6 +256,8 @@ class LLMClient:
         tools: list[dict[str, Any]] | None = None,
         stop: list[str] | None = None,
         model: str | None = None,
+        extra_headers: dict[str, str] | None = None,
+        extra_body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Build kwargs dict for litellm.completion / acompletion."""
         effective_model = model or self.model
@@ -275,6 +277,10 @@ class LLMClient:
             kwargs["tools"] = tools
         if stop:
             kwargs["stop"] = stop
+        if extra_headers:
+            kwargs["extra_headers"] = extra_headers
+        if extra_body:
+            kwargs["extra_body"] = extra_body
         return kwargs
 
     def _fallback_completion(self, kwargs: dict[str, Any], original_error: Exception, *, is_async: bool) -> Any:
@@ -309,14 +315,25 @@ class LLMClient:
     def _record_response_usage(
         self, response: Any, *, provider: str | None = None, model: str | None = None
     ) -> None:
-        """Record token usage from a litellm response."""
+        """Record token usage from a litellm response, including cache metrics."""
         usage = getattr(response, "usage", None)
         if usage:
+            # Anthropic: cache_creation_input_tokens, prompt_tokens_details.cached_tokens
+            cache_creation = getattr(usage, "cache_creation_input_tokens", 0) or 0
+            prompt_details = getattr(usage, "prompt_tokens_details", None)
+            cache_read = getattr(prompt_details, "cached_tokens", 0) or 0 if prompt_details else 0
+
+            # Gemini: cached_content_token_count (different field name)
+            if not cache_read:
+                cache_read = getattr(usage, "cached_content_token_count", 0) or 0
+
             record_usage(
                 input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
                 output_tokens=getattr(usage, "completion_tokens", 0) or 0,
                 provider=provider or self.provider,
                 model=model or self.model,
+                cache_creation_tokens=cache_creation,
+                cache_read_tokens=cache_read,
             )
 
     def _build_messages(self, message: str, **kwargs: Any) -> list[dict[str, str]]:

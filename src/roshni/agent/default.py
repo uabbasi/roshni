@@ -14,7 +14,6 @@ import json
 import re
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
 from time import time
 from typing import Any
 
@@ -24,6 +23,7 @@ from roshni.agent.base import BaseAgent, ChatResult
 from roshni.agent.tools import ToolDefinition
 from roshni.core.config import Config
 from roshni.core.llm.client import LLMClient
+from roshni.core.llm.model_selector import ModelSelector
 from roshni.core.secrets import SecretsManager
 
 # Keywords that suggest a query needs a heavier model.
@@ -47,14 +47,6 @@ _COMPLEX_KEYWORDS: set[str] = {
     "tradeoff",
     "pros and cons",
 }
-
-
-@dataclass
-class ModelSelector:
-    """Pair of light/heavy model names for auto-selection."""
-
-    light: str
-    heavy: str
 
 
 class DefaultAgent(BaseAgent):
@@ -109,6 +101,9 @@ class DefaultAgent(BaseAgent):
         else:
             resolved_prompt = "You are a helpful personal AI assistant."
 
+        # Store persona separately — stable prefix for caching
+        self._persona_prompt = resolved_prompt
+
         # Create LLMClient — single place for model resolution, budget, usage
         llm_kwargs = self._resolve_llm_config(config)
         self._llm = LLMClient(
@@ -143,21 +138,32 @@ class DefaultAgent(BaseAgent):
         message: str,
         *,
         mode: str | None = None,
+        call_type: str | None = None,
         channel: str | None = None,
         max_iterations: int = 5,
         on_tool_start: Callable[[str, int, dict | None], None] | None = None,
         **kwargs: Any,
     ) -> ChatResult:
-        """Process a message with tool-calling loop."""
+        """Process a message with tool-calling loop.
+
+        Args:
+            call_type: Optional call classification (e.g. ``"heartbeat"``,
+                ``"scheduled"``).  Heartbeat/scheduled calls skip conversation
+                history to reduce token usage.
+        """
         self._busy.set()
         start = time()
         tool_call_log: list[dict[str, Any]] = []
         max_followups = int(kwargs.get("max_followups", 3))
+        clear_history = call_type in ("heartbeat", "scheduled")
 
         try:
             pending = self._handle_pending_approval(message, tool_call_log)
             if pending is not None:
                 return pending
+
+            # Track where this turn begins (for clear_history slicing)
+            self._turn_start = len(self.message_history)
 
             # Add user message to history
             self.message_history.append({"role": "user", "content": message})
@@ -180,6 +186,7 @@ class DefaultAgent(BaseAgent):
                 on_tool_start=on_tool_start,
                 mode=mode,
                 selected_model=selected_model,
+                clear_history=clear_history,
             )
             if self._pending_approval:
                 # Approval bail — _run_tool_loop set _pending_approval
@@ -206,6 +213,7 @@ class DefaultAgent(BaseAgent):
                     on_tool_start=on_tool_start,
                     mode=mode,
                     selected_model=selected_model,
+                    clear_history=clear_history,
                 )
                 if self._pending_approval:
                     prompt = self.message_history[-1].get("content", "")
@@ -273,6 +281,7 @@ class DefaultAgent(BaseAgent):
         on_tool_start: Callable[[str, int, dict | None], None] | None,
         mode: str | None = None,
         selected_model: str | None = None,
+        clear_history: bool = False,
     ) -> None:
         """Execute LLM → tool calls → record results loop.
 
@@ -286,7 +295,7 @@ class DefaultAgent(BaseAgent):
             if steering:
                 self.message_history.append({"role": "user", "content": f"[STEERING] {steering}"})
 
-            messages = self._build_messages(mode=mode)
+            messages = self._build_messages(mode=mode, clear_history=clear_history)
 
             # Call LLM via LLMClient (budget + usage + retries)
             response = self._llm.completion(messages, tools=tool_schemas, model=selected_model)
@@ -372,29 +381,46 @@ class DefaultAgent(BaseAgent):
     # Message building
     # ------------------------------------------------------------------
 
-    def _build_messages(self, *, mode: str | None = None) -> list[dict[str, Any]]:
-        """Build the messages list with system prompt, memory, and trimmed history."""
+    def _build_messages(
+        self, *, mode: str | None = None, clear_history: bool = False
+    ) -> list[dict[str, Any]]:
+        """Build the messages list with system prompt, memory, and trimmed history.
+
+        Args:
+            mode: Optional mode hint key.
+            clear_history: When True (heartbeat/scheduled calls), only include
+                messages from the current turn to reduce token usage.
+        """
+        from roshni.core.llm.caching import build_cached_system_message
+
         messages: list[dict[str, Any]] = []
 
-        if self._llm.system_prompt:
-            system_content = self._llm.system_prompt
-
-            # Inject memory context
+        if self._persona_prompt:
+            # Stable portion: persona (changes rarely, cacheable)
+            # Dynamic portion: memory + mode hints (changes per call)
+            dynamic_parts: list[str] = []
             if self._memory_manager:
                 mem_ctx = self._memory_manager.get_context()
                 if mem_ctx:
-                    system_content = f"{system_content}\n\n{mem_ctx}"
-
-            # Inject mode hint
+                    dynamic_parts.append(mem_ctx)
             if mode and mode in self._mode_hints:
-                system_content = f"{system_content}\n\nMODE HINT: {self._mode_hints[mode]}"
+                dynamic_parts.append(f"MODE HINT: {self._mode_hints[mode]}")
 
-            messages.append({"role": "system", "content": system_content})
+            system_msg = build_cached_system_message(
+                stable_text=self._persona_prompt,
+                dynamic_text="\n\n".join(dynamic_parts) if dynamic_parts else None,
+                provider=self._llm.provider,
+            )
+            messages.append(system_msg)
 
-        # Use recent history
-        history = list(self.message_history)
-        if self.max_history_messages and len(history) > self.max_history_messages:
-            history = history[-self.max_history_messages :]
+        # History: skip old history for heartbeat/scheduled calls
+        if clear_history:
+            turn_start = getattr(self, "_turn_start", 0)
+            history = list(self.message_history[turn_start:])
+        else:
+            history = list(self.message_history)
+            if self.max_history_messages and len(history) > self.max_history_messages:
+                history = history[-self.max_history_messages :]
         messages.extend(history)
 
         return messages
@@ -437,14 +463,14 @@ class DefaultAgent(BaseAgent):
 
         # Mode-based override
         if mode and mode in self._heavy_modes:
-            return self._model_selector.heavy
+            return self._model_selector.heavy_model.name
 
         # Keyword / length heuristic
         query_lower = query.lower()
         if len(query) > 150 or any(kw in query_lower for kw in _COMPLEX_KEYWORDS):
-            return self._model_selector.heavy
+            return self._model_selector.heavy_model.name
 
-        return self._model_selector.light
+        return self._model_selector.light_model.name
 
     # ------------------------------------------------------------------
     # Context compression
@@ -513,7 +539,7 @@ class DefaultAgent(BaseAgent):
             {"role": "user", "content": "\n".join(text_parts)},
         ]
         try:
-            light_model = self._model_selector.light if self._model_selector else None
+            light_model = self._model_selector.light_model.name if self._model_selector else None
             response = self._llm.completion(prompt_messages, model=light_model)
             return (response.choices[0].message.content or "").strip()
         except Exception as e:
@@ -569,7 +595,7 @@ class DefaultAgent(BaseAgent):
                     },
                     {"role": "user", "content": user_message},
                 ]
-                light_model = self._model_selector.light if self._model_selector else None
+                light_model = self._model_selector.light_model.name if self._model_selector else None
                 model = light_model or selected_model
                 response = self._llm.completion(prompt_messages, model=model)
                 extracted = (response.choices[0].message.content or "").strip()
