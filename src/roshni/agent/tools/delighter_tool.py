@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from roshni.agent.tools import ToolDefinition
@@ -34,7 +34,43 @@ def _next_id(items: list[dict]) -> int:
     return highest + 1
 
 
-def _morning_brief(name: str = "", location: str = "", top_focus: str = "") -> str:
+def _get_task_summary(tasks_dir: str) -> str:
+    """Read task status from TaskStore if available. Returns summary lines or empty string."""
+    if not tasks_dir:
+        return ""
+    try:
+        from roshni.agent.task_store import TaskStore
+
+        store = TaskStore(tasks_dir)
+        now = datetime.now()
+        today_date = date.today()
+        open_tasks = store.list_tasks(status="open")
+        in_progress = store.list_tasks(status="in_progress")
+
+        overdue = [t for t in open_tasks + in_progress if t.due and t.due < now]
+        due_today = [t for t in open_tasks + in_progress if t.due and t.due.date() == today_date]
+
+        lines: list[str] = []
+        if overdue:
+            lines.append(f"- Overdue tasks ({len(overdue)}):")
+            for t in overdue[:5]:
+                lines.append(f"  - {t.title} (due: {t.due.strftime('%Y-%m-%d') if t.due else '?'})")
+        if due_today:
+            lines.append(f"- Due today ({len(due_today)}):")
+            for t in due_today[:5]:
+                lines.append(f"  - {t.title}")
+        if in_progress:
+            lines.append(f"- In progress ({len(in_progress)}):")
+            for t in in_progress[:3]:
+                lines.append(f"  - {t.title}")
+        if not lines and open_tasks:
+            lines.append(f"- Open tasks: {len(open_tasks)}")
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
+def _morning_brief(name: str = "", location: str = "", top_focus: str = "", tasks_dir: str = "") -> str:
     today = datetime.now().strftime("%A, %B %d")
     user = name or "there"
     focus = top_focus or "your most important task"
@@ -42,6 +78,11 @@ def _morning_brief(name: str = "", location: str = "", top_focus: str = "") -> s
         weather_hint = f"\n- Weather check: run get_weather for {location}"
     else:
         weather_hint = "\n- Weather check: add your location"
+
+    task_section = _get_task_summary(tasks_dir)
+    if task_section:
+        task_section = f"\n\nTask Status:\n{task_section}"
+
     return (
         f"Good morning, {user}. Here is your brief for {today}.\n"
         f"- Top focus: {focus}\n"
@@ -50,6 +91,7 @@ def _morning_brief(name: str = "", location: str = "", top_focus: str = "") -> s
         "- Personal: hydration, movement, and one short break plan"
         f"{weather_hint}\n"
         "- End-of-day: capture wins and carry-overs"
+        f"{task_section}"
     )
 
 
@@ -73,8 +115,30 @@ def _daily_plan(priorities: str, meetings: str = "", constraints: str = "") -> s
     )
 
 
-def _weekly_review(wins: str = "", challenges: str = "", next_week_focus: str = "") -> str:
+def _weekly_review(wins: str = "", challenges: str = "", next_week_focus: str = "", tasks_dir: str = "") -> str:
     week = datetime.now().strftime("Week of %Y-%m-%d")
+
+    completed_section = ""
+    if tasks_dir:
+        try:
+            from roshni.agent.task_store import TaskStore
+
+            store = TaskStore(tasks_dir)
+            done = store.list_tasks(status="done", limit=50)
+            if done:
+                completed_section = "\n\nCompleted Tasks:\n"
+                for t in done[:20]:
+                    completed_section += f"- {t.title}"
+                    if t.project:
+                        completed_section += f" ({t.project})"
+                    completed_section += "\n"
+            # Trigger memory decay — archive old completed tasks
+            archive_result = store.summarize_completed(older_than_days=30)
+            if "Archived" in archive_result:
+                completed_section += f"\n{archive_result}\n"
+        except Exception:
+            pass
+
     return (
         f"Weekly Review - {week}\n\n"
         "Wins:\n"
@@ -87,6 +151,7 @@ def _weekly_review(wins: str = "", challenges: str = "", next_week_focus: str = 
         "- What needs support?\n\n"
         "Next Week Focus:\n"
         f"{next_week_focus or '- Define top 3 outcomes'}"
+        f"{completed_section}"
     )
 
 
@@ -147,13 +212,13 @@ def _complete_reminder(path: Path, reminder_id: int) -> str:
     return f"Reminder {reminder_id} not found."
 
 
-def create_delighter_tools(reminders_path: str) -> list[ToolDefinition]:
+def create_delighter_tools(reminders_path: str, tasks_dir: str = "") -> list[ToolDefinition]:
     """Create delight-oriented planning/reminder tools."""
     path = Path(reminders_path).expanduser()
     return [
         ToolDefinition(
             name="morning_brief",
-            description="Generate a concise morning brief with focus prompts and routines.",
+            description="Generate a concise morning brief with focus prompts, routines, and task status.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -167,6 +232,7 @@ def create_delighter_tools(reminders_path: str) -> list[ToolDefinition]:
                 name=name,
                 location=location,
                 top_focus=top_focus,
+                tasks_dir=tasks_dir,
             ),
             permission="read",
         ),
@@ -201,6 +267,7 @@ def create_delighter_tools(reminders_path: str) -> list[ToolDefinition]:
                 wins,
                 challenges,
                 next_week_focus,
+                tasks_dir=tasks_dir,
             ),
             permission="read",
         ),

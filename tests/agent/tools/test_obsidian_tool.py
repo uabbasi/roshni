@@ -37,8 +37,7 @@ def vault_dir(tmp_dir):
 @pytest.fixture
 def search_tool(vault_dir):
     tools = create_obsidian_tools(vault_dir)
-    assert len(tools) == 1
-    return tools[0]
+    return next(t for t in tools if t.name == "search_vault")
 
 
 class TestSearchVault:

@@ -6,6 +6,7 @@ import os
 
 import yaml
 
+from roshni.agent.permissions import PermissionTier
 from roshni.agent.tools.gmail_tool import create_gmail_tools
 from roshni.core.config import Config
 from roshni.core.secrets import SecretsManager, YamlFileProvider
@@ -53,7 +54,7 @@ def test_send_tool_only_when_allowed_and_credentials_present(tmp_dir):
         {"gmail": {"address": "me@gmail.com", "app_password": "app-pass"}},
     )
 
-    tools = create_gmail_tools(config, secrets)
+    tools = create_gmail_tools(config, secrets, tier=PermissionTier.FULL)
     names = {t.name for t in tools}
     assert "create_email_draft" in names
     assert "send_email" in names

@@ -11,6 +11,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+from roshni.agent.permissions import PermissionTier, filter_tools_by_tier
 from roshni.agent.tools import ToolDefinition
 from roshni.core.config import Config
 from roshni.core.secrets import SecretsManager
@@ -75,7 +76,11 @@ def _send_email(
         return f"Failed to send email: {e}"
 
 
-def create_gmail_tools(config: Config, secrets: SecretsManager) -> list[ToolDefinition]:
+def create_gmail_tools(
+    config: Config,
+    secrets: SecretsManager,
+    tier: PermissionTier = PermissionTier.INTERACT,
+) -> list[ToolDefinition]:
     """Create Gmail tools using config-driven safety settings."""
     tools: list[ToolDefinition] = []
 
@@ -142,4 +147,4 @@ def create_gmail_tools(config: Config, secrets: SecretsManager) -> list[ToolDefi
             )
         )
 
-    return tools
+    return filter_tools_by_tier(tools, tier)

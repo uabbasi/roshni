@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from roshni.agent.permissions import PermissionTier, filter_tools_by_tier
 from roshni.agent.tools import ToolDefinition
 from roshni.core.config import Config
 from roshni.core.secrets import SecretsManager
@@ -70,7 +71,11 @@ def _fmt_result(label: str, payload: dict[str, Any], client: NotionClient) -> st
     return f"{label} done.{suffix}".strip()
 
 
-def create_notion_tools(config: Config, secrets: SecretsManager) -> list[ToolDefinition]:
+def create_notion_tools(
+    config: Config,
+    secrets: SecretsManager,
+    tier: PermissionTier = PermissionTier.INTERACT,
+) -> list[ToolDefinition]:
     notion_cfg = config.get("integrations.notion", {}) or {}
     token = secrets.get("notion.token", "")
     database_id = notion_cfg.get("database_id", "")
@@ -92,7 +97,7 @@ def create_notion_tools(config: Config, secrets: SecretsManager) -> list[ToolDef
         )
         return _fmt_result("Page update", payload, client)
 
-    return [
+    tools = [
         ToolDefinition(
             name="notion_list_pages",
             description="List recent pages from the configured Notion database.",
@@ -184,4 +189,19 @@ def create_notion_tools(config: Config, secrets: SecretsManager) -> list[ToolDef
             function=lambda page_id, text: _fmt_result("Append block", client.append_paragraph(page_id, text), client),
             permission="write",
         ),
+        ToolDefinition(
+            name="notion_delete_page",
+            description="Delete (archive) a Notion page permanently.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "page_id": {"type": "string", "description": "Page ID to delete"},
+                },
+                "required": ["page_id"],
+            },
+            function=lambda page_id: _fmt_result("Page delete", client.update_page(page_id, archived=True), client),
+            permission="admin",
+        ),
     ]
+
+    return filter_tools_by_tier(tools, tier)

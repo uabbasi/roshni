@@ -298,6 +298,23 @@ def init() -> None:
                 "Telegram requires an allowed user ID for security. Re-run and provide your Telegram user ID."
             )
 
+    # --- Vault setup ---
+    existing_vault = existing_config.get("vault", {}) or {}
+    existing_vault_path = existing_vault.get("path", "")
+    existing_agent_dir = existing_vault.get("agent_dir", "")
+
+    click.echo("\nVault configuration (the agent's brain lives in your Obsidian vault):")
+    vault_path = click.prompt(
+        "  Path to your Obsidian vault",
+        default=existing_vault_path or "~/Obsidian",
+    )
+    vault_path = str(Path(vault_path).expanduser())
+
+    agent_dir = click.prompt(
+        "  Agent directory name in vault",
+        default=existing_agent_dir or bot_name.lower().replace(" ", "-"),
+    )
+
     # --- Integrations ---
     click.echo("\nOptional integrations (you can add these later):")
     integrations: dict = existing_config.get("integrations", {}) or {}
@@ -473,17 +490,65 @@ def init() -> None:
         google_docs_ro = click.confirm("    Docs read-only access", default=google_docs_ro)
         google_sheets_ro = click.confirm("    Sheets read-only access", default=google_sheets_ro)
 
+    # --- Permission tiers ---
+    existing_perms = existing_config.get("permissions", {}) or {}
+    tier_choices = ["observe", "interact", "full"]
+
+    click.echo("\nPermission levels for enabled integrations:")
+    click.echo("  (observe=read-only, interact=read+writes, full=everything)")
+
+    permissions_cfg: dict[str, str] = {}
+    domain_defaults = {
+        "gmail": "interact",
+        "obsidian": "interact",
+        "trello": "interact",
+        "notion": "interact",
+        "health": "observe",
+        "tasks": "interact",
+        "vault": "interact",
+    }
+    enabled_domains: list[tuple[str, bool]] = [
+        ("gmail", gmail_enabled),
+        ("trello", trello_enabled),
+        ("notion", notion_enabled),
+        ("obsidian", obsidian_enabled),
+        ("health", healthkit_enabled),
+    ]
+    # Tasks and vault are always-on when vault is configured
+    enabled_domains.append(("tasks", True))
+    enabled_domains.append(("vault", True))
+
+    for domain, enabled in enabled_domains:
+        if not enabled:
+            permissions_cfg[domain] = "none"
+            continue
+        default_tier = existing_perms.get(domain, domain_defaults.get(domain, "interact"))
+        tier = _prompt_choice(
+            f"  {domain.title()} permission level?",
+            tier_choices,
+            default=default_tier,
+        )
+        permissions_cfg[domain] = tier
+
     # --- Generate files ---
     click.echo("\nSaving configuration...")
 
     # Ensure directories
     ROSHNI_DIR.mkdir(exist_ok=True)
-    PERSONA_DIR.mkdir(exist_ok=True)
-    (ROSHNI_DIR / "notes").mkdir(exist_ok=True)
     (ROSHNI_DIR / "logs").mkdir(exist_ok=True)
     (ROSHNI_DIR / "drafts" / "email").mkdir(parents=True, exist_ok=True)
     if google_enabled:
         Path(google_token_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
+
+    # Scaffold vault
+    from roshni.agent.vault import VaultManager
+
+    vault = VaultManager(vault_path, agent_dir)
+    vault.scaffold()
+    click.echo(f"  Vault:   {vault.base_dir}/")
+
+    # Persona dir points into vault now
+    persona_dir = vault.persona_dir
 
     # Config — new multi-provider format
     from roshni.core.llm.config import get_default_model
@@ -507,11 +572,15 @@ def init() -> None:
         "user": {"name": user_name},
         "llm": llm_config,
         "platform": platform,
+        "vault": {
+            "path": vault_path,
+            "agent_dir": agent_dir,
+        },
+        "permissions": permissions_cfg,
         "paths": {
             "data_dir": str(ROSHNI_DIR),
-            "notes_dir": str(ROSHNI_DIR / "notes"),
             "log_dir": str(ROSHNI_DIR / "logs"),
-            "persona_dir": str(PERSONA_DIR),
+            "persona_dir": str(persona_dir),
             "email_drafts_dir": str(ROSHNI_DIR / "drafts" / "email"),
             "reminders_path": str(ROSHNI_DIR / "reminders.json"),
         },
@@ -592,18 +661,27 @@ def init() -> None:
     os.chmod(SECRETS_PATH, stat.S_IRUSR | stat.S_IWUSR)  # 600
     click.echo(f"  Secrets: {SECRETS_PATH} (mode 600)")
 
-    # Persona files
+    # Persona files — written into vault
     try:
-        from roshni.agent.templates import get_identity_template, get_soul_template, get_user_template
+        from roshni.agent.templates import (
+            get_agents_template,
+            get_identity_template,
+            get_soul_template,
+            get_user_template,
+        )
 
-        identity_content = get_identity_template(tone).replace("{bot_name}", bot_name).replace("{user_name}", user_name)
-        soul_content = get_soul_template().replace("{bot_name}", bot_name).replace("{user_name}", user_name)
-        user_content = get_user_template().replace("{bot_name}", bot_name).replace("{user_name}", user_name)
+        replacements = {"{bot_name}": bot_name, "{user_name}": user_name}
 
-        (PERSONA_DIR / "IDENTITY.md").write_text(identity_content)
-        (PERSONA_DIR / "SOUL.md").write_text(soul_content)
-        (PERSONA_DIR / "USER.md").write_text(user_content)
-        click.echo(f"  Persona: {PERSONA_DIR}/")
+        def _apply(content: str) -> str:
+            for k, v in replacements.items():
+                content = content.replace(k, v)
+            return content
+
+        (persona_dir / "IDENTITY.md").write_text(_apply(get_identity_template(tone)))
+        (persona_dir / "SOUL.md").write_text(_apply(get_soul_template()))
+        (persona_dir / "USER.md").write_text(_apply(get_user_template()))
+        (persona_dir / "AGENTS.md").write_text(_apply(get_agents_template()))
+        click.echo(f"  Persona: {persona_dir}/")
     except Exception as e:
         click.echo(f"  Warning: Could not write persona files: {e}")
 
@@ -623,12 +701,17 @@ def init() -> None:
     else:
         gmail_status = "disabled"
 
+    # Build permission summary
+    perm_summary = ", ".join(f"{d}={t}" for d, t in permissions_cfg.items() if t != "none")
+
     console.print(
         Panel(
             f"Bot name: {bot_name}\n"
             f"Tone: {tone}\n"
             f"Provider: {providers_summary}\n"
             f"Platform: {platform}\n"
+            f"Vault: {vault.base_dir}\n"
+            f"Permissions: {perm_summary}\n"
             f"Write approvals: {'enabled' if require_write_approval else 'disabled'}\n"
             f"Gmail: {gmail_status}\n"
             f"Obsidian: {'enabled' if obsidian_enabled else 'disabled'}\n"

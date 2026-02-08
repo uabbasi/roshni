@@ -22,4 +22,9 @@ def get_user_template() -> str:
     return _read_template("user_template.md")
 
 
+def get_agents_template() -> str:
+    """Get the agents operational policies template."""
+    return _read_template("agents_template.md")
+
+
 AVAILABLE_TONES = ["friendly", "professional", "warm", "witty"]

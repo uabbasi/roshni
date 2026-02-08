@@ -70,13 +70,29 @@ def create_agent(config, secrets):
 
     set_api_key_env(config, secrets)
 
-    persona_dir = config.get("paths.persona_dir", str(ROSHNI_DIR / "persona"))
+    # Resolve paths from vault when configured, else fall back to legacy paths
+    vault_cfg = config.get("vault", {}) or {}
+    vault_path = vault_cfg.get("path", "")
+    if vault_path:
+        from roshni.agent.vault import VaultManager
+
+        vault = VaultManager(vault_path, vault_cfg.get("agent_dir", "jarvis"))
+        persona_dir = str(vault.persona_dir)
+        memory_path = str(vault.memory_dir / "MEMORY.md")
+    else:
+        persona_dir = config.get("paths.persona_dir", str(ROSHNI_DIR / "persona"))
+        memory_path = None
+
     tools = create_tools(config, secrets)
 
-    return DefaultAgent(
+    kwargs: dict = dict(
         config=config,
         secrets=secrets,
         tools=tools,
         persona_dir=persona_dir,
         name=config.get("bot.name", "Roshni"),
     )
+    if memory_path:
+        kwargs["memory_path"] = memory_path
+
+    return DefaultAgent(**kwargs)

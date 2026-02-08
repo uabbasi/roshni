@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
+from roshni.agent.permissions import PermissionTier, filter_tools_by_tier
 from roshni.agent.tools import ToolDefinition
 from roshni.health.plugins.apple_health_export import AppleHealthExportCollector
 
@@ -92,8 +93,11 @@ def _get_health_summary(export_path: str, start_date: str = "", end_date: str = 
     return "\n".join(lines)
 
 
-def create_health_tools(export_path: str) -> list[ToolDefinition]:
-    return [
+def create_health_tools(
+    export_path: str,
+    tier: PermissionTier = PermissionTier.INTERACT,
+) -> list[ToolDefinition]:
+    tools = [
         ToolDefinition(
             name="get_health_summary",
             description=(
@@ -111,3 +115,4 @@ def create_health_tools(export_path: str) -> list[ToolDefinition]:
             permission="read",
         )
     ]
+    return filter_tools_by_tier(tools, tier)

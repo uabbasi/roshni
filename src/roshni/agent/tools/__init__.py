@@ -99,14 +99,40 @@ class ToolDefinition:
 
 def create_tools(config: Config, secrets: SecretsManager) -> list[ToolDefinition]:
     """Build the tool list based on enabled integrations in config."""
+    from roshni.agent.permissions import get_domain_tier
+
     tools: list[ToolDefinition] = []
     integrations = config.get("integrations", {}) or {}
+    permissions_cfg = config.get("permissions", {}) or {}
 
-    # Notes tool — always available
-    from .notes_tool import create_notes_tools
+    # Vault tools (task + vault sections) — always-on when vault is configured
+    vault_cfg = config.get("vault", {}) or {}
+    vault_path = vault_cfg.get("path", "")
+    tasks_dir = ""
+    if vault_path:
+        try:
+            from roshni.agent.vault import VaultManager
 
-    notes_dir = config.get("paths.notes_dir") or str(config.get("paths.data_dir", "~/.roshni") + "/notes")
-    tools.extend(create_notes_tools(notes_dir))
+            from .task_tool import create_task_tools
+            from .vault_tools import create_vault_tools
+
+            vault = VaultManager(vault_path, vault_cfg.get("agent_dir", "jarvis"))
+            tasks_dir = str(vault.tasks_dir)
+
+            vault_tier = get_domain_tier(permissions_cfg, "vault")
+            tools.extend(create_vault_tools(vault, vault_tier))
+
+            task_tier = get_domain_tier(permissions_cfg, "tasks")
+            tools.extend(create_task_tools(tasks_dir, task_tier, projects_dir=str(vault.projects_dir)))
+        except Exception as e:
+            logger.warning(f"Could not load vault/task tools: {e}")
+
+    # Notes tool — only when vault is not configured (superseded by vault tools)
+    if not vault_path:
+        from .notes_tool import create_notes_tools
+
+        notes_dir = config.get("paths.notes_dir") or str(config.get("paths.data_dir", "~/.roshni") + "/notes")
+        tools.extend(create_notes_tools(notes_dir))
 
     # Built-in tools (weather + web search/fetch) — enabled by default
     builtins_cfg = integrations.get("builtins", {}) or {}
@@ -128,7 +154,7 @@ def create_tools(config: Config, secrets: SecretsManager) -> list[ToolDefinition
                 "paths.reminders_path",
                 str(config.get("paths.data_dir", "~/.roshni") + "/reminders.json"),
             )
-            tools.extend(create_delighter_tools(reminders_path))
+            tools.extend(create_delighter_tools(reminders_path, tasks_dir=tasks_dir))
         except Exception as e:
             logger.warning(f"Could not load delighter tools: {e}")
 
@@ -138,19 +164,21 @@ def create_tools(config: Config, secrets: SecretsManager) -> list[ToolDefinition
         try:
             from .gmail_tool import create_gmail_tools
 
-            tools.extend(create_gmail_tools(config, secrets))
+            gmail_tier = get_domain_tier(permissions_cfg, "gmail")
+            tools.extend(create_gmail_tools(config, secrets, tier=gmail_tier))
         except Exception as e:
             logger.warning(f"Could not load Gmail tools: {e}")
 
     # Obsidian tool — when obsidian is enabled
     obsidian_cfg = integrations.get("obsidian", {}) or {}
     if obsidian_cfg.get("enabled"):
-        vault_path = obsidian_cfg.get("vault_path", "")
-        if vault_path:
+        obs_vault_path = obsidian_cfg.get("vault_path", "")
+        if obs_vault_path:
             try:
                 from .obsidian_tool import create_obsidian_tools
 
-                tools.extend(create_obsidian_tools(vault_path))
+                obsidian_tier = get_domain_tier(permissions_cfg, "obsidian")
+                tools.extend(create_obsidian_tools(obs_vault_path, tier=obsidian_tier))
             except Exception as e:
                 logger.warning(f"Could not load Obsidian tools: {e}")
 
@@ -160,7 +188,8 @@ def create_tools(config: Config, secrets: SecretsManager) -> list[ToolDefinition
         try:
             from .trello_tool import create_trello_tools
 
-            tools.extend(create_trello_tools(config, secrets))
+            trello_tier = get_domain_tier(permissions_cfg, "trello")
+            tools.extend(create_trello_tools(config, secrets, tier=trello_tier))
         except Exception as e:
             logger.warning(f"Could not load Trello tools: {e}")
 
@@ -170,7 +199,8 @@ def create_tools(config: Config, secrets: SecretsManager) -> list[ToolDefinition
         try:
             from .notion_tool import create_notion_tools
 
-            tools.extend(create_notion_tools(config, secrets))
+            notion_tier = get_domain_tier(permissions_cfg, "notion")
+            tools.extend(create_notion_tools(config, secrets, tier=notion_tier))
         except Exception as e:
             logger.warning(f"Could not load Notion tools: {e}")
 
@@ -182,7 +212,8 @@ def create_tools(config: Config, secrets: SecretsManager) -> list[ToolDefinition
             try:
                 from .health_tool import create_health_tools
 
-                tools.extend(create_health_tools(export_path))
+                health_tier = get_domain_tier(permissions_cfg, "health")
+                tools.extend(create_health_tools(export_path, tier=health_tier))
             except Exception as e:
                 logger.warning(f"Could not load HealthKit tools: {e}")
 

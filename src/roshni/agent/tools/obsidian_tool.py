@@ -1,10 +1,12 @@
-"""Obsidian tool — keyword search over a vault of markdown files."""
+"""Obsidian tool — keyword search and write over a vault of markdown files."""
 
 from __future__ import annotations
 
 import os
 import re
+from pathlib import Path
 
+from roshni.agent.permissions import PermissionTier, filter_tools_by_tier
 from roshni.agent.tools import ToolDefinition
 
 
@@ -69,9 +71,53 @@ def _search_vault(query: str, vault_path: str, limit: int = 5) -> str:
     return "\n\n---\n\n".join(results)
 
 
-def create_obsidian_tools(vault_path: str) -> list[ToolDefinition]:
-    """Create vault search tool."""
-    return [
+def _resolve_write_path(vault_path: str, sandbox_dir: str, note_path: str) -> Path:
+    """Resolve a note path, scoping writes to sandbox_dir when set."""
+    vault = Path(vault_path).expanduser().resolve()
+    if sandbox_dir:
+        base = (vault / sandbox_dir).resolve()
+    else:
+        base = vault
+    target = (base / note_path).resolve()
+    if not str(target).startswith(str(base)):
+        raise ValueError(f"Path escapes allowed directory: {note_path}")
+    return target
+
+
+def _create_vault_note(vault_path: str, sandbox_dir: str, path: str, content: str) -> str:
+    """Create a new markdown note in the vault."""
+    if not path.endswith(".md"):
+        path += ".md"
+    target = _resolve_write_path(vault_path, sandbox_dir, path)
+    if target.exists():
+        return f"Note already exists: {target.relative_to(Path(vault_path).expanduser().resolve())}"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
+    return f"Note created: {target.relative_to(Path(vault_path).expanduser().resolve())}"
+
+
+def _update_vault_note(vault_path: str, sandbox_dir: str, path: str, content: str, mode: str = "append") -> str:
+    """Update an existing markdown note in the vault."""
+    if not path.endswith(".md"):
+        path += ".md"
+    target = _resolve_write_path(vault_path, sandbox_dir, path)
+    if not target.exists():
+        return f"Note not found: {path}"
+    if mode == "append":
+        with open(target, "a", encoding="utf-8") as f:
+            f.write("\n" + content)
+    else:
+        target.write_text(content, encoding="utf-8")
+    return f"Note updated ({mode}): {target.relative_to(Path(vault_path).expanduser().resolve())}"
+
+
+def create_obsidian_tools(
+    vault_path: str,
+    sandbox_dir: str = "",
+    tier: PermissionTier = PermissionTier.INTERACT,
+) -> list[ToolDefinition]:
+    """Create vault search and write tools."""
+    tools = [
         ToolDefinition(
             name="search_vault",
             description=(
@@ -92,4 +138,40 @@ def create_obsidian_tools(vault_path: str) -> list[ToolDefinition]:
             function=lambda query: _search_vault(query, vault_path),
             permission="read",
         ),
+        ToolDefinition(
+            name="create_vault_note",
+            description="Create a new markdown note in the Obsidian vault.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Note path relative to vault (e.g. 'ideas/my-note.md')"},
+                    "content": {"type": "string", "description": "Markdown content for the note"},
+                },
+                "required": ["path", "content"],
+            },
+            function=lambda path, content: _create_vault_note(vault_path, sandbox_dir, path, content),
+            permission="write",
+        ),
+        ToolDefinition(
+            name="update_vault_note",
+            description="Update an existing markdown note in the Obsidian vault.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Note path relative to vault"},
+                    "content": {"type": "string", "description": "Content to write or append"},
+                    "mode": {
+                        "type": "string",
+                        "description": "Write mode: 'append' (default) or 'overwrite'",
+                        "enum": ["append", "overwrite"],
+                    },
+                },
+                "required": ["path", "content"],
+            },
+            function=lambda path, content, mode="append": _update_vault_note(
+                vault_path, sandbox_dir, path, content, mode
+            ),
+            permission="write",
+        ),
     ]
+    return filter_tools_by_tier(tools, tier)

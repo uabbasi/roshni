@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from roshni.agent.permissions import PermissionTier, filter_tools_by_tier
 from roshni.agent.tools import ToolDefinition
 from roshni.core.config import Config
 from roshni.core.secrets import SecretsManager
@@ -125,7 +126,11 @@ def _fmt_result(label: str, payload: dict[str, Any]) -> str:
     return f"{label} done.{suffix}".strip()
 
 
-def create_trello_tools(config: Config, secrets: SecretsManager) -> list[ToolDefinition]:
+def create_trello_tools(
+    config: Config,
+    secrets: SecretsManager,
+    tier: PermissionTier = PermissionTier.INTERACT,
+) -> list[ToolDefinition]:
     trello_cfg = config.get("integrations.trello", {}) or {}
     api_key = secrets.get("trello.api_key", "")
     token = secrets.get("trello.token", "")
@@ -243,7 +248,7 @@ def create_trello_tools(config: Config, secrets: SecretsManager) -> list[ToolDef
                 "required": ["board_id"],
             },
             function=lambda board_id: _fmt_result("Board delete", client.delete_board(board_id)),
-            permission="write",
+            permission="admin",
         ),
         ToolDefinition(
             name="trello_list_lists",
@@ -443,7 +448,7 @@ def create_trello_tools(config: Config, secrets: SecretsManager) -> list[ToolDef
                 "required": ["card_id"],
             },
             function=lambda card_id: _fmt_result("Card delete", client.delete_card(card_id)),
-            permission="write",
+            permission="admin",
         ),
         ToolDefinition(
             name="trello_list_labels",
@@ -510,7 +515,7 @@ def create_trello_tools(config: Config, secrets: SecretsManager) -> list[ToolDef
                 "required": ["label_id"],
             },
             function=lambda label_id: _fmt_result("Label delete", client.delete_label(label_id)),
-            permission="write",
+            permission="admin",
         ),
         ToolDefinition(
             name="trello_add_label_to_card",
@@ -543,6 +548,8 @@ def create_trello_tools(config: Config, secrets: SecretsManager) -> list[ToolDef
             permission="write",
         ),
     ]
+
+    tools = filter_tools_by_tier(tools, tier)
 
     # Option to disable destructive board deletion at config level.
     if bool(trello_cfg.get("disable_board_delete", False)):
