@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time as _time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -11,6 +12,8 @@ from loguru import logger
 
 from roshni.core.config import Config
 from roshni.core.secrets import SecretsManager
+
+_TRANSIENT_ERRORS = (ConnectionError, TimeoutError, OSError)
 
 
 @dataclass
@@ -23,6 +26,35 @@ class ToolDefinition:
     function: Callable[..., str]
     permission: str = "read"  # read, write, send, admin
     requires_approval: bool | None = None
+
+    @classmethod
+    def from_function(
+        cls,
+        func: Callable[..., str],
+        name: str,
+        description: str,
+        args_schema: Any,
+        permission: str = "read",
+        requires_approval: bool | None = None,
+    ) -> ToolDefinition:
+        """Create a ToolDefinition from a function and a schema class.
+
+        The *args_schema* must have a ``model_json_schema()`` method (e.g. a
+        Pydantic BaseModel subclass). This avoids importing Pydantic directly.
+        """
+        schema = args_schema.model_json_schema()
+        schema.pop("title", None)
+        schema.pop("$defs", None)
+        for prop in schema.get("properties", {}).values():
+            prop.pop("title", None)
+        return cls(
+            name=name,
+            description=description,
+            parameters=schema,
+            function=func,
+            permission=permission,
+            requires_approval=requires_approval,
+        )
 
     def to_litellm_schema(self) -> dict[str, Any]:
         """Convert to litellm/OpenAI function calling format."""
@@ -41,18 +73,28 @@ class ToolDefinition:
             return self.requires_approval
         return self.permission in {"write", "send", "admin"}
 
-    def execute(self, arguments: dict[str, Any] | str) -> str:
-        """Execute the tool with the given arguments."""
+    def execute(self, arguments: dict[str, Any] | str, *, max_attempts: int = 3) -> str:
+        """Execute the tool, retrying transient errors with exponential backoff."""
         if isinstance(arguments, str):
             try:
                 arguments = json.loads(arguments)
             except json.JSONDecodeError:
                 return f"Error: could not parse arguments: {arguments}"
-        try:
-            return self.function(**arguments)
-        except Exception as e:
-            logger.error(f"Tool {self.name} failed: {e}")
-            return f"Error executing {self.name}: {e}"
+        assert isinstance(arguments, dict)
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return self.function(**arguments)
+            except _TRANSIENT_ERRORS as e:
+                if attempt < max_attempts:
+                    _time.sleep(2 ** (attempt - 1))
+                    logger.warning(f"Tool {self.name} transient error (attempt {attempt}/{max_attempts}): {e}")
+                    continue
+                logger.error(f"Tool {self.name} failed after {max_attempts} attempts: {e}")
+                return f"Error: {self.name} failed after {max_attempts} attempts: {e}"
+            except Exception as e:
+                logger.error(f"Tool {self.name} failed: {e}")
+                return f"Error executing {self.name}: {e}"
+        return f"Error: {self.name} failed after {max_attempts} attempts"
 
 
 def create_tools(config: Config, secrets: SecretsManager) -> list[ToolDefinition]:

@@ -2,7 +2,8 @@
 
 from .base import BaseAgent, ChatResult
 from .circuit_breaker import CircuitBreaker, CircuitBreakerConfig
-from .default import DefaultAgent
+from .default import DefaultAgent, ModelSelector
+from .memory import MemoryManager
 from .persona import get_system_prompt
 from .router import CommandParseResult, Router, RouteResult
 
@@ -13,6 +14,8 @@ __all__ = [
     "CircuitBreakerConfig",
     "CommandParseResult",
     "DefaultAgent",
+    "MemoryManager",
+    "ModelSelector",
     "RouteResult",
     "Router",
     "get_system_prompt",

@@ -2,12 +2,19 @@
 
 A ready-to-use agent that combines persona loading, tool execution,
 and multi-turn conversation via LLMClient's provider-agnostic API.
+
+Enhanced with: context compression, follow-up queue processing,
+mode hints, model auto-selection, empty-response synthesis,
+conversation logging, and persistent memory.
 """
 
 from __future__ import annotations
 
 import json
+import re
+import threading
 from collections.abc import Callable
+from dataclasses import dataclass
 from time import time
 from typing import Any
 
@@ -18,6 +25,36 @@ from roshni.agent.tools import ToolDefinition
 from roshni.core.config import Config
 from roshni.core.llm.client import LLMClient
 from roshni.core.secrets import SecretsManager
+
+# Keywords that suggest a query needs a heavier model.
+# TODO: Tune based on downstream usage patterns.
+_COMPLEX_KEYWORDS: set[str] = {
+    "analyze",
+    "compare",
+    "explain",
+    "plan",
+    "design",
+    "refactor",
+    "summarize",
+    "review",
+    "debug",
+    "evaluate",
+    "research",
+    "strategy",
+    "architect",
+    "optimize",
+    "trade-off",
+    "tradeoff",
+    "pros and cons",
+}
+
+
+@dataclass
+class ModelSelector:
+    """Pair of light/heavy model names for auto-selection."""
+
+    light: str
+    heavy: str
 
 
 class DefaultAgent(BaseAgent):
@@ -40,13 +77,27 @@ class DefaultAgent(BaseAgent):
         name: str = "assistant",
         temperature: float = 0.7,
         max_history_messages: int = 20,
+        # -- New (all keyword-only, all have defaults → backward compatible) --
+        mode_hints: dict[str, str] | None = None,
+        model_selector: ModelSelector | None = None,
+        heavy_modes: set[str] | None = None,
+        enable_compression: bool = False,
+        memory_path: str | None = None,
+        on_chat_complete: Callable[[str, str, list[dict]], None] | None = None,
     ):
         super().__init__(name=name)
 
         self.config = config
         self.secrets = secrets
-        self.tools = tools or []
+        self.tools = list(tools) if tools else []
         self.max_history_messages = max_history_messages
+
+        # New feature state
+        self._mode_hints = mode_hints or {}
+        self._model_selector = model_selector
+        self._heavy_modes = heavy_modes or set()
+        self._enable_compression = enable_compression
+        self._on_chat_complete = on_chat_complete
 
         # Build system prompt
         if system_prompt:
@@ -71,6 +122,14 @@ class DefaultAgent(BaseAgent):
         self._pending_approval: dict[str, Any] | None = None
         self._require_write_approval = bool(config.get("security.require_write_approval", True))
 
+        # Memory system
+        self._memory_manager = None
+        if memory_path:
+            from roshni.agent.memory import MemoryManager, create_save_memory_tool
+
+            self._memory_manager = MemoryManager(memory_path)
+            self.tools.append(create_save_memory_tool(self._memory_manager))
+
     @property
     def model(self) -> str:
         return self._llm.model
@@ -93,6 +152,7 @@ class DefaultAgent(BaseAgent):
         self._busy.set()
         start = time()
         tool_call_log: list[dict[str, Any]] = []
+        max_followups = int(kwargs.get("max_followups", 3))
 
         try:
             pending = self._handle_pending_approval(message, tool_call_log)
@@ -102,119 +162,87 @@ class DefaultAgent(BaseAgent):
             # Add user message to history
             self.message_history.append({"role": "user", "content": message})
 
+            # Compression check
+            if self._enable_compression:
+                self._maybe_compress_history()
+
+            # Model selection
+            selected_model = self._select_model(message, mode)
+
             # Build tool schemas
             tool_schemas = [t.to_litellm_schema() for t in self.tools] if self.tools else None
 
-            for _iteration in range(max_iterations):
-                # Check for steering messages
-                steering = self.drain_steering()
-                if steering:
-                    self.message_history.append({"role": "user", "content": f"[STEERING] {steering}"})
+            # --- Main tool loop ---
+            self._run_tool_loop(
+                tool_schemas=tool_schemas,
+                tool_call_log=tool_call_log,
+                max_iterations=max_iterations,
+                on_tool_start=on_tool_start,
+                mode=mode,
+                selected_model=selected_model,
+            )
+            if self._pending_approval:
+                # Approval bail — _run_tool_loop set _pending_approval
+                prompt = self.message_history[-1].get("content", "")
+                self._trim_history()
+                return ChatResult(
+                    text=prompt,
+                    duration=time() - start,
+                    tool_calls=tool_call_log,
+                    model=self.model,
+                )
 
-                messages = self._build_messages()
-
-                # Call LLM via LLMClient (budget + usage + retries)
-                response = self._llm.completion(messages, tools=tool_schemas)
-                choice = response.choices[0]
-                assistant_message = choice.message
-
-                # Add assistant response to history
-                msg_dict: dict[str, Any] = {"role": "assistant"}
-                if assistant_message.content:
-                    msg_dict["content"] = assistant_message.content
-                if hasattr(assistant_message, "tool_calls") and assistant_message.tool_calls:
-                    msg_dict["tool_calls"] = [
-                        {
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.function.name,
-                                "arguments": tc.function.arguments,
-                            },
-                        }
-                        for tc in assistant_message.tool_calls
-                    ]
-                self.message_history.append(msg_dict)
-
-                # If no tool calls, we're done
-                if not hasattr(assistant_message, "tool_calls") or not assistant_message.tool_calls:
+            # --- Follow-up queue processing ---
+            followups = self.drain_followups()[:max_followups]
+            for followup_msg in followups:
+                if not self._within_token_budget(0.85):
+                    logger.info("Skipping remaining followups — approaching context limit")
                     break
-
-                # Execute tool calls
-                tool_map = {t.name: t for t in self.tools}
-                for i, tool_call in enumerate(assistant_message.tool_calls):
-                    fn_name = tool_call.function.name
-                    fn_args = tool_call.function.arguments
-
-                    if on_tool_start:
-                        try:
-                            args_dict = json.loads(fn_args) if isinstance(fn_args, str) else fn_args
-                        except json.JSONDecodeError:
-                            args_dict = {}
-                        on_tool_start(fn_name, i, args_dict)
-
-                    logger.debug(f"Tool call: {fn_name}({fn_args})")
-
-                    tool = tool_map.get(fn_name)
-                    if tool:
-                        if self._should_require_approval(tool):
-                            try:
-                                parsed_args = json.loads(fn_args) if isinstance(fn_args, str) else fn_args
-                            except json.JSONDecodeError:
-                                parsed_args = {}
-
-                            self._pending_approval = {
-                                "tool": tool,
-                                "tool_name": fn_name,
-                                "raw_args": fn_args,
-                                "parsed_args": parsed_args if isinstance(parsed_args, dict) else {},
-                            }
-                            prompt = self._build_approval_prompt(fn_name, self._pending_approval["parsed_args"])
-                            self.message_history.append({"role": "assistant", "content": prompt})
-                            self._trim_history()
-                            return ChatResult(
-                                text=prompt,
-                                duration=time() - start,
-                                tool_calls=tool_call_log,
-                                model=self.model,
-                            )
-                        result = tool.execute(fn_args)
-                    else:
-                        result = f"Unknown tool: {fn_name}"
-
-                    tool_call_log.append(
-                        {
-                            "name": fn_name,
-                            "args": fn_args,
-                            "result": result,
-                        }
+                self.message_history.append({"role": "user", "content": followup_msg})
+                self._run_tool_loop(
+                    tool_schemas=tool_schemas,
+                    tool_call_log=tool_call_log,
+                    max_iterations=max_iterations,
+                    on_tool_start=on_tool_start,
+                    mode=mode,
+                    selected_model=selected_model,
+                )
+                if self._pending_approval:
+                    prompt = self.message_history[-1].get("content", "")
+                    self._trim_history()
+                    return ChatResult(
+                        text=prompt,
+                        duration=time() - start,
+                        tool_calls=tool_call_log,
+                        model=self.model,
                     )
 
-                    # Add tool result to history
-                    self.message_history.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "content": result,
-                        }
-                    )
-
-            # Extract final text
-            final_text = ""
-            for msg in reversed(self.message_history):
-                if msg.get("role") == "assistant" and msg.get("content"):
-                    final_text = msg["content"]
-                    break
+            # --- Empty response synthesis ---
+            final_text = self._extract_final_text()
+            if not final_text and tool_call_log:
+                final_text = self._synthesize_response(selected_model)
 
             # Trim history
             self._trim_history()
 
-            return ChatResult(
+            result = ChatResult(
                 text=final_text,
                 duration=time() - start,
                 tool_calls=tool_call_log,
                 model=self.model,
             )
+
+            # Fire logging hook (daemon thread — won't block response)
+            if self._on_chat_complete:
+                self._fire_chat_complete(message, final_text, tool_call_log)
+
+            # Fire memory auto-extraction if needed
+            if self._memory_manager and self._memory_manager.detect_trigger(message):
+                save_memory_called = any(tc.get("name") == "save_memory" for tc in tool_call_log)
+                if not save_memory_called:
+                    self._fire_memory_extraction(message, selected_model)
+
+            return result
 
         except Exception as e:
             logger.error(f"DefaultAgent error: {e}")
@@ -232,12 +260,136 @@ class DefaultAgent(BaseAgent):
         self.message_history = []
         self._pending_approval = None
 
-    def _build_messages(self) -> list[dict[str, Any]]:
-        """Build the messages list with system prompt and trimmed history."""
+    # ------------------------------------------------------------------
+    # Tool loop
+    # ------------------------------------------------------------------
+
+    def _run_tool_loop(
+        self,
+        *,
+        tool_schemas: list[dict[str, Any]] | None,
+        tool_call_log: list[dict[str, Any]],
+        max_iterations: int,
+        on_tool_start: Callable[[str, int, dict | None], None] | None,
+        mode: str | None = None,
+        selected_model: str | None = None,
+    ) -> None:
+        """Execute LLM → tool calls → record results loop.
+
+        Mutates ``message_history`` and *tool_call_log* in place.
+        If an approval-requiring tool is encountered, sets
+        ``self._pending_approval`` and returns early.
+        """
+        for _iteration in range(max_iterations):
+            # Check for steering messages
+            steering = self.drain_steering()
+            if steering:
+                self.message_history.append({"role": "user", "content": f"[STEERING] {steering}"})
+
+            messages = self._build_messages(mode=mode)
+
+            # Call LLM via LLMClient (budget + usage + retries)
+            response = self._llm.completion(messages, tools=tool_schemas, model=selected_model)
+            choice = response.choices[0]
+            assistant_message = choice.message
+
+            # Add assistant response to history
+            msg_dict: dict[str, Any] = {"role": "assistant"}
+            if assistant_message.content:
+                msg_dict["content"] = assistant_message.content
+            if hasattr(assistant_message, "tool_calls") and assistant_message.tool_calls:
+                msg_dict["tool_calls"] = [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments,
+                        },
+                    }
+                    for tc in assistant_message.tool_calls
+                ]
+            self.message_history.append(msg_dict)
+
+            # If no tool calls, we're done
+            if not hasattr(assistant_message, "tool_calls") or not assistant_message.tool_calls:
+                break
+
+            # Execute tool calls
+            tool_map = {t.name: t for t in self.tools}
+            for i, tool_call in enumerate(assistant_message.tool_calls):
+                fn_name = tool_call.function.name
+                fn_args = tool_call.function.arguments
+
+                if on_tool_start:
+                    try:
+                        args_dict = json.loads(fn_args) if isinstance(fn_args, str) else fn_args
+                    except json.JSONDecodeError:
+                        args_dict = {}
+                    on_tool_start(fn_name, i, args_dict)
+
+                logger.debug(f"Tool call: {fn_name}({fn_args})")
+
+                tool = tool_map.get(fn_name)
+                if tool:
+                    if self._should_require_approval(tool):
+                        try:
+                            parsed_args = json.loads(fn_args) if isinstance(fn_args, str) else fn_args
+                        except json.JSONDecodeError:
+                            parsed_args = {}
+
+                        self._pending_approval = {
+                            "tool": tool,
+                            "tool_name": fn_name,
+                            "raw_args": fn_args,
+                            "parsed_args": parsed_args if isinstance(parsed_args, dict) else {},
+                        }
+                        prompt = self._build_approval_prompt(fn_name, self._pending_approval["parsed_args"])
+                        self.message_history.append({"role": "assistant", "content": prompt})
+                        return  # Caller checks _pending_approval
+                    result = tool.execute(fn_args)
+                else:
+                    result = f"Unknown tool: {fn_name}"
+
+                tool_call_log.append(
+                    {
+                        "name": fn_name,
+                        "args": fn_args,
+                        "result": result,
+                    }
+                )
+
+                # Add tool result to history
+                self.message_history.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": result,
+                    }
+                )
+
+    # ------------------------------------------------------------------
+    # Message building
+    # ------------------------------------------------------------------
+
+    def _build_messages(self, *, mode: str | None = None) -> list[dict[str, Any]]:
+        """Build the messages list with system prompt, memory, and trimmed history."""
         messages: list[dict[str, Any]] = []
 
         if self._llm.system_prompt:
-            messages.append({"role": "system", "content": self._llm.system_prompt})
+            system_content = self._llm.system_prompt
+
+            # Inject memory context
+            if self._memory_manager:
+                mem_ctx = self._memory_manager.get_context()
+                if mem_ctx:
+                    system_content = f"{system_content}\n\n{mem_ctx}"
+
+            # Inject mode hint
+            if mode and mode in self._mode_hints:
+                system_content = f"{system_content}\n\nMODE HINT: {self._mode_hints[mode]}"
+
+            messages.append({"role": "system", "content": system_content})
 
         # Use recent history
         history = list(self.message_history)
@@ -247,10 +399,209 @@ class DefaultAgent(BaseAgent):
 
         return messages
 
+    # ------------------------------------------------------------------
+    # Empty response synthesis
+    # ------------------------------------------------------------------
+
+    def _extract_final_text(self) -> str:
+        """Walk history backward to find the last assistant text."""
+        for msg in reversed(self.message_history):
+            if msg.get("role") == "assistant" and msg.get("content"):
+                return str(msg["content"])
+        return ""
+
+    def _synthesize_response(self, selected_model: str | None = None) -> str:
+        """Force a text response when the LLM only made tool calls."""
+        self.message_history.append(
+            {"role": "user", "content": "Based on all the tool results above, provide a complete written response."}
+        )
+        messages = self._build_messages()
+        try:
+            response = self._llm.completion(messages, model=selected_model)
+            text = response.choices[0].message.content or ""
+            if text:
+                self.message_history.append({"role": "assistant", "content": text})
+            return text
+        except Exception as e:
+            logger.warning(f"Synthesis call failed: {e}")
+            return ""
+
+    # ------------------------------------------------------------------
+    # Model auto-selection
+    # ------------------------------------------------------------------
+
+    def _select_model(self, query: str, mode: str | None) -> str | None:
+        """Choose light or heavy model based on query complexity and mode."""
+        if not self._model_selector:
+            return None
+
+        # Mode-based override
+        if mode and mode in self._heavy_modes:
+            return self._model_selector.heavy
+
+        # Keyword / length heuristic
+        query_lower = query.lower()
+        if len(query) > 150 or any(kw in query_lower for kw in _COMPLEX_KEYWORDS):
+            return self._model_selector.heavy
+
+        return self._model_selector.light
+
+    # ------------------------------------------------------------------
+    # Context compression
+    # ------------------------------------------------------------------
+
+    _STANDING_INSTRUCTION_RE = re.compile(
+        r"(?:always|never|remember|don'?t forget|from now on|going forward)\s+.+",
+        re.IGNORECASE,
+    )
+
+    def _maybe_compress_history(self) -> None:
+        """Compress old history when approaching the context limit."""
+        from roshni.core.llm.token_management import estimate_token_count, get_model_context_limit
+
+        history = self.message_history
+        if len(history) <= 4:
+            return
+
+        # Estimate total tokens in history
+        total_text = " ".join(m.get("content", "") for m in history if m.get("content"))
+        total_tokens = estimate_token_count(total_text)
+        context_limit = get_model_context_limit(self._llm.model, self._llm.provider)
+
+        if total_tokens < context_limit * 0.70:
+            return
+
+        logger.info(f"Compressing history: {total_tokens} tokens / {context_limit} limit")
+
+        # Extract standing instructions from old messages
+        old_messages = history[:-4]
+        standing: list[str] = []
+        for msg in old_messages:
+            content = msg.get("content", "")
+            for match in self._STANDING_INSTRUCTION_RE.finditer(content):
+                standing.append(match.group(0).strip())
+
+        # Try LLM summarisation
+        summary = self._summarize_old_messages(old_messages)
+
+        # Build compressed history
+        compressed: list[dict[str, Any]] = []
+        if standing:
+            compressed.append(
+                {"role": "user", "content": "[STANDING INSTRUCTIONS]\n" + "\n".join(f"- {s}" for s in standing)}
+            )
+        if summary:
+            compressed.append({"role": "user", "content": f"[CONVERSATION SUMMARY]\n{summary}"})
+
+        # Keep last 4 messages
+        compressed.extend(history[-4:])
+        self.message_history = compressed
+
+    def _summarize_old_messages(self, messages: list[dict[str, Any]]) -> str:
+        """Use the LLM to summarise old messages. Returns empty string on failure."""
+        text_parts = []
+        for m in messages:
+            role = m.get("role", "")
+            content = m.get("content", "")
+            if content:
+                text_parts.append(f"{role}: {content[:200]}")
+        if not text_parts:
+            return ""
+
+        prompt_messages = [
+            {"role": "system", "content": "Summarize this conversation in 2-3 sentences. Be concise."},
+            {"role": "user", "content": "\n".join(text_parts)},
+        ]
+        try:
+            light_model = self._model_selector.light if self._model_selector else None
+            response = self._llm.completion(prompt_messages, model=light_model)
+            return (response.choices[0].message.content or "").strip()
+        except Exception as e:
+            logger.warning(f"Summarization failed, falling back to truncation: {e}")
+            return ""
+
+    # ------------------------------------------------------------------
+    # Token budget helper
+    # ------------------------------------------------------------------
+
+    def _within_token_budget(self, threshold: float = 0.85) -> bool:
+        """Return True if current history is within *threshold* of context limit."""
+        from roshni.core.llm.token_management import estimate_token_count, get_model_context_limit
+
+        total_text = " ".join(m.get("content", "") for m in self.message_history if m.get("content"))
+        total_tokens = estimate_token_count(total_text)
+        context_limit = get_model_context_limit(self._llm.model, self._llm.provider)
+        return total_tokens < context_limit * threshold
+
+    # ------------------------------------------------------------------
+    # Logging hook
+    # ------------------------------------------------------------------
+
+    def _fire_chat_complete(self, user_msg: str, response: str, tool_calls: list[dict]) -> None:
+        """Fire on_chat_complete in a daemon thread (fire-and-forget)."""
+
+        def _run() -> None:
+            try:
+                self._on_chat_complete(user_msg, response, tool_calls)  # type: ignore[misc]
+            except Exception as e:
+                logger.warning(f"on_chat_complete hook failed: {e}")
+
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+
+    # ------------------------------------------------------------------
+    # Memory auto-extraction
+    # ------------------------------------------------------------------
+
+    def _fire_memory_extraction(self, user_message: str, selected_model: str | None) -> None:
+        """Background daemon thread: extract and save a standing instruction."""
+
+        def _run() -> None:
+            try:
+                prompt_messages = [
+                    {
+                        "role": "system",
+                        "content": (
+                            "Extract the standing instruction or preference from the following message. "
+                            "Reply with ONLY the extracted instruction, nothing else. "
+                            "If there is no clear instruction, reply with exactly: NONE"
+                        ),
+                    },
+                    {"role": "user", "content": user_message},
+                ]
+                light_model = self._model_selector.light if self._model_selector else None
+                model = light_model or selected_model
+                response = self._llm.completion(prompt_messages, model=model)
+                extracted = (response.choices[0].message.content or "").strip()
+                if not extracted or extracted.upper() == "NONE":
+                    return
+
+                # Determine section
+                msg_lower = user_message.lower()
+                if any(kw in msg_lower for kw in ("always", "never", "prefer", "like", "hate")):
+                    section = "preferences"
+                else:
+                    section = "decisions"
+
+                self._memory_manager.save(section, extracted)  # type: ignore[union-attr]
+            except Exception as e:
+                logger.debug(f"Memory auto-extraction failed (non-fatal): {e}")
+
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+
+    # ------------------------------------------------------------------
+    # History management
+    # ------------------------------------------------------------------
+
     def _trim_history(self) -> None:
         """Keep history within bounds."""
         if self.max_history_messages and len(self.message_history) > self.max_history_messages * 2:
             self.message_history = self.message_history[-self.max_history_messages :]
+
+    # ------------------------------------------------------------------
+    # Approval workflow
+    # ------------------------------------------------------------------
 
     def _should_require_approval(self, tool: ToolDefinition) -> bool:
         return self._require_write_approval and tool.needs_approval()
@@ -316,6 +667,10 @@ class DefaultAgent(BaseAgent):
         self.message_history.append({"role": "assistant", "content": text})
         self._trim_history()
         return ChatResult(text=text, tool_calls=tool_call_log, model=self.model)
+
+    # ------------------------------------------------------------------
+    # Config resolution
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _resolve_llm_config(config: Config) -> dict[str, Any]:

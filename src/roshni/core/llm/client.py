@@ -91,6 +91,7 @@ class LLMClient:
         *,
         tools: list[dict[str, Any]] | None = None,
         stop: list[str] | None = None,
+        model: str | None = None,
     ) -> Any:
         """Low-level completion call with budget checking, usage recording, and fallback.
 
@@ -104,6 +105,8 @@ class LLMClient:
             messages: Full messages list (system + history + user).
             tools: Optional tool schemas in OpenAI function-calling format.
             stop: Optional stop sequences.
+            model: Optional per-request model override. When provided,
+                uses this model instead of ``self.model`` for this single call.
 
         Returns:
             The raw litellm response object.
@@ -118,7 +121,7 @@ class LLMClient:
             raise ImportError("Install LLM support with: pip install roshni[llm]")
 
         self._check_budget()
-        kwargs = self._build_completion_kwargs(messages, tools=tools, stop=stop)
+        kwargs = self._build_completion_kwargs(messages, tools=tools, stop=stop, model=model)
 
         try:
             response = litellm.completion(**kwargs)
@@ -135,6 +138,7 @@ class LLMClient:
         *,
         tools: list[dict[str, Any]] | None = None,
         stop: list[str] | None = None,
+        model: str | None = None,
     ) -> Any:
         """Async version of completion() with fallback support."""
         try:
@@ -143,7 +147,7 @@ class LLMClient:
             raise ImportError("Install LLM support with: pip install roshni[llm]")
 
         self._check_budget()
-        kwargs = self._build_completion_kwargs(messages, tools=tools, stop=stop)
+        kwargs = self._build_completion_kwargs(messages, tools=tools, stop=stop, model=model)
 
         try:
             response = await litellm.acompletion(**kwargs)
@@ -251,13 +255,19 @@ class LLMClient:
         *,
         tools: list[dict[str, Any]] | None = None,
         stop: list[str] | None = None,
+        model: str | None = None,
     ) -> dict[str, Any]:
         """Build kwargs dict for litellm.completion / acompletion."""
+        effective_model = model or self.model
+        max_tokens = self.max_tokens
+        if model and model != self.model:
+            override_limit = get_model_max_tokens(model, infer_provider(model))
+            max_tokens = min(self.max_tokens, override_limit)
         kwargs: dict[str, Any] = {
-            "model": self.model,
+            "model": effective_model,
             "messages": messages,
             "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
+            "max_tokens": max_tokens,
             "timeout": self.timeout,
             "num_retries": self.num_retries,
         }
