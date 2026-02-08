@@ -38,8 +38,11 @@ def _mask_key(key: str) -> str:
     return key[:4] + "..." + key[-4:]
 
 
-def _validate_api_key(provider: str, api_key: str) -> bool:
-    """Make a test LLM call to validate the API key."""
+def _validate_api_key(provider: str, api_key: str) -> bool | None:
+    """Make a test LLM call to validate the API key.
+
+    Returns True if valid, False if invalid, None if validation was skipped.
+    """
     try:
         import litellm
 
@@ -55,7 +58,7 @@ def _validate_api_key(provider: str, api_key: str) -> bool:
         return True
     except ImportError:
         # litellm not installed — skip validation
-        return True
+        return None
     except Exception as e:
         click.echo(f"  API key validation failed: {e}")
         return False
@@ -174,8 +177,11 @@ def init() -> None:
         api_key = click.prompt(f"Paste your {provider_names[provider]} API key{hint}", hide_input=True)
 
         click.echo("  Validating...")
-        if _validate_api_key(provider, api_key):
-            click.echo("  [green]Valid![/green]" if hasattr(console, "print") else "  Valid!")
+        validation = _validate_api_key(provider, api_key)
+        if validation is True:
+            console.print("  [green]Valid![/green]")
+        elif validation is None:
+            click.echo("  Skipped (install roshni[llm] to validate)")
         else:
             if not click.confirm("  Key validation failed. Use it anyway?", default=False):
                 raise click.Abort()
