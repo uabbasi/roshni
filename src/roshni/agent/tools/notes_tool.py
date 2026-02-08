@@ -92,6 +92,7 @@ def create_notes_tools(notes_dir: str) -> list[ToolDefinition]:
                 "required": ["content"],
             },
             function=lambda content, title="": _save_note(content, title, notes_dir),
+            permission="write",
         ),
         ToolDefinition(
             name="recall_notes",
@@ -107,5 +108,6 @@ def create_notes_tools(notes_dir: str) -> list[ToolDefinition]:
                 "required": [],
             },
             function=lambda query="": _recall_notes(query, notes_dir),
+            permission="read",
         ),
     ]

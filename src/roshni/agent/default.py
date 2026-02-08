@@ -68,6 +68,8 @@ class DefaultAgent(BaseAgent):
         )
 
         self.message_history: list[dict[str, Any]] = []
+        self._pending_approval: dict[str, Any] | None = None
+        self._require_write_approval = bool(config.get("security.require_write_approval", True))
 
     @property
     def model(self) -> str:
@@ -93,6 +95,10 @@ class DefaultAgent(BaseAgent):
         tool_call_log: list[dict[str, Any]] = []
 
         try:
+            pending = self._handle_pending_approval(message, tool_call_log)
+            if pending is not None:
+                return pending
+
             # Add user message to history
             self.message_history.append({"role": "user", "content": message})
 
@@ -151,6 +157,27 @@ class DefaultAgent(BaseAgent):
 
                     tool = tool_map.get(fn_name)
                     if tool:
+                        if self._should_require_approval(tool):
+                            try:
+                                parsed_args = json.loads(fn_args) if isinstance(fn_args, str) else fn_args
+                            except json.JSONDecodeError:
+                                parsed_args = {}
+
+                            self._pending_approval = {
+                                "tool": tool,
+                                "tool_name": fn_name,
+                                "raw_args": fn_args,
+                                "parsed_args": parsed_args if isinstance(parsed_args, dict) else {},
+                            }
+                            prompt = self._build_approval_prompt(fn_name, self._pending_approval["parsed_args"])
+                            self.message_history.append({"role": "assistant", "content": prompt})
+                            self._trim_history()
+                            return ChatResult(
+                                text=prompt,
+                                duration=time() - start,
+                                tool_calls=tool_call_log,
+                                model=self.model,
+                            )
                         result = tool.execute(fn_args)
                     else:
                         result = f"Unknown tool: {fn_name}"
@@ -203,6 +230,7 @@ class DefaultAgent(BaseAgent):
     def clear_history(self) -> None:
         """Clear conversation history."""
         self.message_history = []
+        self._pending_approval = None
 
     def _build_messages(self) -> list[dict[str, Any]]:
         """Build the messages list with system prompt and trimmed history."""
@@ -223,6 +251,71 @@ class DefaultAgent(BaseAgent):
         """Keep history within bounds."""
         if self.max_history_messages and len(self.message_history) > self.max_history_messages * 2:
             self.message_history = self.message_history[-self.max_history_messages :]
+
+    def _should_require_approval(self, tool: ToolDefinition) -> bool:
+        return self._require_write_approval and tool.needs_approval()
+
+    @staticmethod
+    def _approval_decision(message: str) -> str:
+        normalized = (message or "").strip().lower()
+        if normalized in {"approve", "yes", "y", "confirm", "ok", "proceed"}:
+            return "approve"
+        if normalized in {"deny", "no", "n", "cancel", "stop"}:
+            return "deny"
+        return "unknown"
+
+    @staticmethod
+    def _format_args_for_prompt(args: dict[str, Any]) -> str:
+        if not args:
+            return "(no arguments)"
+        shown = []
+        for key, value in args.items():
+            text = str(value)
+            if len(text) > 120:
+                text = text[:117] + "..."
+            shown.append(f"- {key}: {text}")
+        return "\n".join(shown)
+
+    def _build_approval_prompt(self, tool_name: str, args: dict[str, Any]) -> str:
+        return (
+            "Approval required for write action:\n"
+            f"- Tool: {tool_name}\n"
+            f"{self._format_args_for_prompt(args)}\n\n"
+            "Reply `approve` to continue or `deny` to cancel."
+        )
+
+    def _handle_pending_approval(self, message: str, tool_call_log: list[dict[str, Any]]) -> ChatResult | None:
+        if not self._pending_approval:
+            return None
+
+        decision = self._approval_decision(message)
+        tool = self._pending_approval["tool"]
+        tool_name = self._pending_approval["tool_name"]
+        raw_args = self._pending_approval["raw_args"]
+        parsed_args = self._pending_approval["parsed_args"]
+
+        self.message_history.append({"role": "user", "content": message})
+
+        if decision == "approve":
+            result = tool.execute(raw_args)
+            tool_call_log.append({"name": tool_name, "args": raw_args, "result": result})
+            self._pending_approval = None
+            text = f"Approved and executed `{tool_name}`.\n\n{result}"
+            self.message_history.append({"role": "assistant", "content": text})
+            self._trim_history()
+            return ChatResult(text=text, tool_calls=tool_call_log, model=self.model)
+
+        if decision == "deny":
+            self._pending_approval = None
+            text = f"Canceled `{tool_name}`."
+            self.message_history.append({"role": "assistant", "content": text})
+            self._trim_history()
+            return ChatResult(text=text, tool_calls=tool_call_log, model=self.model)
+
+        text = self._build_approval_prompt(tool_name, parsed_args)
+        self.message_history.append({"role": "assistant", "content": text})
+        self._trim_history()
+        return ChatResult(text=text, tool_calls=tool_call_log, model=self.model)
 
     @staticmethod
     def _resolve_llm_config(config: Config) -> dict[str, Any]:

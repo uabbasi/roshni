@@ -83,7 +83,7 @@ class TestTelegramGatewayInit:
     def test_authorization_empty_allowlist(self):
         agent = MockAgent()
         gw = TelegramGateway(agent=agent, bot_token="fake")
-        assert gw._is_authorized(999)
+        assert not gw._is_authorized(999)
 
     def test_authorization_with_allowlist(self):
         agent = MockAgent()

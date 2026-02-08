@@ -65,6 +65,9 @@ dev = [
 [project.scripts]
 roshni = "roshni.core.cli:main"
 
+[project.entry-points."roshni.health_collectors"]
+apple_health_export = "roshni.health.plugins.apple_health_export:AppleHealthExportCollector"
+
 [project.urls]
 Homepage = "https://github.com/uabbasi/roshni"
 Repository = "https://github.com/uabbasi/roshni"

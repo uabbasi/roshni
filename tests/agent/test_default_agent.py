@@ -45,6 +45,21 @@ def echo_tool():
     )
 
 
+@pytest.fixture
+def write_tool():
+    return ToolDefinition(
+        name="write_thing",
+        description="Write a value",
+        parameters={
+            "type": "object",
+            "properties": {"text": {"type": "string"}},
+            "required": ["text"],
+        },
+        function=lambda text: f"Wrote: {text}",
+        permission="write",
+    )
+
+
 def _make_response(content, tool_calls=None):
     """Helper to build a mock litellm completion response."""
     msg = MagicMock()
@@ -158,6 +173,36 @@ class TestDefaultAgentChat:
         assert tools_arg is not None
         assert len(tools_arg) == 1
         assert tools_arg[0]["function"]["name"] == "echo"
+
+    @patch("roshni.core.llm.client.LLMClient.completion")
+    def test_write_tool_requires_approval(self, mock_completion, config, secrets, write_tool):
+        tool_call = MagicMock()
+        tool_call.id = "call_approval"
+        tool_call.function.name = "write_thing"
+        tool_call.function.arguments = '{"text": "hello"}'
+        mock_completion.return_value = _make_response(None, tool_calls=[tool_call])
+
+        agent = DefaultAgent(config=config, secrets=secrets, tools=[write_tool])
+        result = agent.chat("Save hello")
+        assert "Approval required" in result.text
+
+        approved = agent.chat("approve")
+        assert "Approved and executed" in approved.text
+        assert approved.tool_calls[0]["name"] == "write_thing"
+        assert "Wrote: hello" in approved.text
+
+    @patch("roshni.core.llm.client.LLMClient.completion")
+    def test_write_tool_denied(self, mock_completion, config, secrets, write_tool):
+        tool_call = MagicMock()
+        tool_call.id = "call_approval"
+        tool_call.function.name = "write_thing"
+        tool_call.function.arguments = '{"text": "hello"}'
+        mock_completion.return_value = _make_response(None, tool_calls=[tool_call])
+
+        agent = DefaultAgent(config=config, secrets=secrets, tools=[write_tool])
+        _ = agent.chat("Save hello")
+        denied = agent.chat("deny")
+        assert "Canceled" in denied.text
 
 
 class TestDefaultAgentMultiProviderConfig:

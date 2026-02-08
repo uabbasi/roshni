@@ -120,8 +120,8 @@ class TelegramGateway(BotGateway):
     def _is_authorized(self, user_id: int) -> bool:
         """Check if a user is in the allowlist."""
         if not self.allowed_user_ids:
-            logger.warning("No Telegram allowlist configured — allowing all users")
-            return True
+            logger.warning("No Telegram allowlist configured — denying access")
+            return False
         return user_id in self.allowed_user_ids
 
     async def start(self) -> None:
@@ -139,6 +139,13 @@ class TelegramGateway(BotGateway):
             if not update.effective_user or not update.message:
                 return
             user_id = update.effective_user.id
+            if not gateway._is_authorized(user_id):
+                await update.message.reply_text(
+                    "This bot is locked to an allowlist.\n"
+                    f"Share this user ID with the owner to be added: <code>{user_id}</code>",
+                    parse_mode="HTML",
+                )
+                return
             name = agent.name or "Roshni"
             await update.message.reply_text(
                 f"Hi! I'm {name}, your personal assistant.\n\n"

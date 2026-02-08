@@ -30,6 +30,9 @@ def run() -> None:
         return
 
     allowed_ids = config.get("telegram.allowed_user_ids", []) or []
+    if not allowed_ids:
+        click.echo("No Telegram allowed user IDs configured. Run 'roshni init' and add your Telegram user ID.")
+        return
 
     # Create agent and gateway
     agent = create_agent(config, secrets)

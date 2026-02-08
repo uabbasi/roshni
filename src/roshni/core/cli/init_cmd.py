@@ -104,7 +104,7 @@ def init() -> None:
     else:
         console.print(
             Panel(
-                "Let's set up your personal AI assistant.\nThis takes about 2 minutes.",
+                "Let's set up your personal AI assistant.\nThis takes about 5 minutes.",
                 title="Welcome to Roshni",
             )
         )
@@ -136,6 +136,13 @@ def init() -> None:
         tone = tones[int(tone_input) - 1]
     except (ValueError, IndexError):
         tone = tone_input if tone_input in tones else default_tone
+
+    # --- Security ---
+    security_cfg = existing_config.get("security", {}) or {}
+    require_write_approval = click.confirm(
+        "\nRequire approval before write/send actions? (recommended)",
+        default=security_cfg.get("require_write_approval", True),
+    )
 
     # --- LLM providers ---
     from roshni.core.llm.config import PROVIDER_ENV_MAP
@@ -280,33 +287,54 @@ def init() -> None:
                     title="Find Your Telegram User ID",
                 )
             )
-            telegram_user_id = click.prompt("Your Telegram user ID")
+            while True:
+                telegram_user_id = click.prompt("Your Telegram user ID").strip()
+                if telegram_user_id.isdigit():
+                    break
+                click.echo("Please enter numbers only (example: 123456789).")
+
+        if not telegram_user_id:
+            raise click.ClickException(
+                "Telegram requires an allowed user ID for security. Re-run and provide your Telegram user ID."
+            )
 
     # --- Integrations ---
     click.echo("\nOptional integrations (you can add these later):")
     integrations: dict = existing_config.get("integrations", {}) or {}
 
     # Gmail
-    gmail_enabled = integrations.get("gmail", {}).get("enabled", False)
-    gmail_enabled = click.confirm("  Enable Gmail (send emails)?", default=gmail_enabled)
+    gmail_cfg = integrations.get("gmail", {}) or {}
+    gmail_enabled = click.confirm(
+        "  Enable Gmail assistant? (draft mode by default)",
+        default=gmail_cfg.get("enabled", False),
+    )
+    gmail_mode = "draft"
+    gmail_allow_send = False
     gmail_address = existing_secrets.get("gmail", {}).get("address", "")
     gmail_app_password = existing_secrets.get("gmail", {}).get("app_password", "")
     if gmail_enabled:
-        gmail_address = click.prompt("    Gmail address", default=gmail_address)
-        change_pw = not gmail_app_password or click.confirm(
-            "    Set/change Gmail App Password?",
-            default=not bool(gmail_app_password),
+        click.echo("    Gmail default is draft-only (no sending).")
+        gmail_address = click.prompt("    Gmail address (for drafting context)", default=gmail_address)
+        gmail_allow_send = click.confirm(
+            "    Allow direct sending too? (higher risk)",
+            default=gmail_cfg.get("allow_send", False),
         )
-        if change_pw:
-            console.print(
-                Panel(
-                    "1. Go to myaccount.google.com → Security → App Passwords\n"
-                    "2. Create a new app password for 'Mail'\n"
-                    "3. Copy the 16-character password",
-                    title="Gmail App Password",
-                )
+        if gmail_allow_send:
+            gmail_mode = "send"
+            change_pw = not gmail_app_password or click.confirm(
+                "    Set/change Gmail App Password?",
+                default=not bool(gmail_app_password),
             )
-            gmail_app_password = click.prompt("    App Password", hide_input=True)
+            if change_pw:
+                console.print(
+                    Panel(
+                        "1. Go to myaccount.google.com → Security → App Passwords\n"
+                        "2. Create a new app password for 'Mail'\n"
+                        "3. Copy the 16-character password",
+                        title="Gmail App Password",
+                    )
+                )
+                gmail_app_password = click.prompt("    App Password", hide_input=True)
 
     # Obsidian
     obsidian_enabled = integrations.get("obsidian", {}).get("enabled", False)
@@ -316,6 +344,135 @@ def init() -> None:
         obsidian_path = click.prompt("    Path to Obsidian vault", default=obsidian_path)
         obsidian_path = str(Path(obsidian_path).expanduser())
 
+    # Trello
+    trello_cfg = integrations.get("trello", {}) or {}
+    trello_enabled = click.confirm(
+        "  Enable Trello project tools? (boards/lists/cards/labels/comments)",
+        default=trello_cfg.get("enabled", False),
+    )
+    trello_disable_board_delete = bool(trello_cfg.get("disable_board_delete", False))
+    trello_api_key = existing_secrets.get("trello", {}).get("api_key", "")
+    trello_token = existing_secrets.get("trello", {}).get("token", "")
+    if trello_enabled:
+        if not trello_api_key or click.confirm("    Set/change Trello API key?", default=not bool(trello_api_key)):
+            console.print(
+                Panel(
+                    "1. Visit https://trello.com/power-ups/admin\n"
+                    "2. Open your Power-Up / API page and copy your API key",
+                    title="Trello API Key",
+                )
+            )
+            trello_api_key = click.prompt("    Trello API key", hide_input=True)
+        if not trello_token or click.confirm("    Set/change Trello token?", default=not bool(trello_token)):
+            console.print(
+                Panel(
+                    "1. Open https://trello.com/1/authorize with your key\n"
+                    "2. Generate a token with read/write scopes\n"
+                    "3. Copy the token value",
+                    title="Trello Token",
+                )
+            )
+            trello_token = click.prompt("    Trello token", hide_input=True)
+        trello_disable_board_delete = click.confirm(
+            "    Disable permanent board deletion tool? (recommended)",
+            default=trello_disable_board_delete,
+        )
+
+    # Notion
+    notion_cfg = integrations.get("notion", {}) or {}
+    notion_enabled = click.confirm(
+        "  Enable Notion knowledge tools? (search/create/update pages)",
+        default=notion_cfg.get("enabled", False),
+    )
+    notion_database_id = notion_cfg.get("database_id", "")
+    notion_title_property = notion_cfg.get("title_property", "Name")
+    notion_token = existing_secrets.get("notion", {}).get("token", "")
+    if notion_enabled:
+        notion_database_id = click.prompt("    Notion database ID", default=notion_database_id)
+        notion_title_property = click.prompt("    Notion title property name", default=notion_title_property)
+        if not notion_token or click.confirm(
+            "    Set/change Notion integration token?",
+            default=not bool(notion_token),
+        ):
+            console.print(
+                Panel(
+                    "1. Create a Notion internal integration at https://www.notion.so/my-integrations\n"
+                    "2. Copy the integration token\n"
+                    "3. Share your target database with that integration",
+                    title="Notion Token",
+                )
+            )
+            notion_token = click.prompt("    Notion token", hide_input=True)
+
+    # HealthKit (Apple Health export)
+    healthkit_cfg = integrations.get("healthkit", {}) or {}
+    healthkit_enabled = click.confirm(
+        "  Enable HealthKit import via Apple Health export.xml?",
+        default=healthkit_cfg.get("enabled", False),
+    )
+    healthkit_export_path = str(
+        Path(healthkit_cfg.get("export_path", "~/Downloads/apple_health_export/export.xml")).expanduser()
+    )
+    if healthkit_enabled:
+        healthkit_export_path = str(
+            Path(
+                click.prompt(
+                    "    Path to Apple Health export.xml",
+                    default=healthkit_export_path,
+                )
+            ).expanduser()
+        )
+
+    # Builtins + delighters
+    builtins_cfg = integrations.get("builtins", {}) or {}
+    delighters_cfg = integrations.get("delighters", {}) or {}
+    builtins_enabled = click.confirm(
+        "  Enable builtins (weather, web search/fetch)?",
+        default=builtins_cfg.get("enabled", True),
+    )
+    delighters_enabled = click.confirm(
+        "  Enable delighters (morning brief, plans, reminders)?",
+        default=delighters_cfg.get("enabled", True),
+    )
+
+    # Google Workspace profile (least-privilege defaults)
+    google_cfg = integrations.get("google_workspace", {}) or {}
+    google_enabled = click.confirm(
+        "  Enable Google Workspace profile? (Gmail drafts, Calendar, Docs, Sheets)",
+        default=google_cfg.get("enabled", False),
+    )
+    google_credentials_path = str(
+        Path(google_cfg.get("credentials_path", "~/.roshni/google/client_secret.json")).expanduser()
+    )
+    google_token_path = str(Path(google_cfg.get("token_path", "~/.roshni/google/token.pickle")).expanduser())
+    google_scopes = google_cfg.get("scopes", {}) or {}
+    google_gmail_drafts = bool(google_scopes.get("gmail_drafts", True))
+    google_calendar_rw = bool(google_scopes.get("calendar_rw", True))
+    google_docs_ro = bool(google_scopes.get("docs_readonly", True))
+    google_sheets_ro = bool(google_scopes.get("sheets_readonly", True))
+    if google_enabled:
+        click.echo("    Least-privilege defaults are preselected.")
+        google_credentials_path = str(
+            Path(
+                click.prompt(
+                    "    OAuth client credentials JSON path",
+                    default=google_credentials_path,
+                )
+            ).expanduser()
+        )
+        google_token_path = str(
+            Path(
+                click.prompt(
+                    "    OAuth token cache path",
+                    default=google_token_path,
+                )
+            ).expanduser()
+        )
+        google_gmail_drafts = click.confirm("    Gmail draft access", default=google_gmail_drafts)
+        google_calendar_rw = click.confirm("    Calendar read/write access", default=google_calendar_rw)
+        google_docs_ro = click.confirm("    Docs read-only access", default=google_docs_ro)
+        google_sheets_ro = click.confirm("    Sheets read-only access", default=google_sheets_ro)
+
     # --- Generate files ---
     click.echo("\nSaving configuration...")
 
@@ -324,6 +481,9 @@ def init() -> None:
     PERSONA_DIR.mkdir(exist_ok=True)
     (ROSHNI_DIR / "notes").mkdir(exist_ok=True)
     (ROSHNI_DIR / "logs").mkdir(exist_ok=True)
+    (ROSHNI_DIR / "drafts" / "email").mkdir(parents=True, exist_ok=True)
+    if google_enabled:
+        Path(google_token_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
 
     # Config — new multi-provider format
     from roshni.core.llm.config import get_default_model
@@ -352,7 +512,10 @@ def init() -> None:
             "notes_dir": str(ROSHNI_DIR / "notes"),
             "log_dir": str(ROSHNI_DIR / "logs"),
             "persona_dir": str(PERSONA_DIR),
+            "email_drafts_dir": str(ROSHNI_DIR / "drafts" / "email"),
+            "reminders_path": str(ROSHNI_DIR / "reminders.json"),
         },
+        "security": {"require_write_approval": require_write_approval},
     }
 
     if platform == "telegram":
@@ -361,10 +524,40 @@ def init() -> None:
         }
 
     config_data["integrations"] = {
-        "gmail": {"enabled": gmail_enabled},
+        "gmail": {
+            "enabled": gmail_enabled,
+            "mode": gmail_mode,
+            "allow_send": gmail_allow_send,
+        },
         "obsidian": {
             "enabled": obsidian_enabled,
             "vault_path": obsidian_path,
+        },
+        "builtins": {"enabled": builtins_enabled},
+        "delighters": {"enabled": delighters_enabled},
+        "google_workspace": {
+            "enabled": google_enabled,
+            "credentials_path": google_credentials_path,
+            "token_path": google_token_path,
+            "scopes": {
+                "gmail_drafts": google_gmail_drafts,
+                "calendar_rw": google_calendar_rw,
+                "docs_readonly": google_docs_ro,
+                "sheets_readonly": google_sheets_ro,
+            },
+        },
+        "trello": {
+            "enabled": trello_enabled,
+            "disable_board_delete": trello_disable_board_delete,
+        },
+        "notion": {
+            "enabled": notion_enabled,
+            "database_id": notion_database_id,
+            "title_property": notion_title_property,
+        },
+        "healthkit": {
+            "enabled": healthkit_enabled,
+            "export_path": healthkit_export_path,
         },
     }
 
@@ -378,10 +571,20 @@ def init() -> None:
     }
     if telegram_token:
         secrets_data["telegram"] = {"bot_token": telegram_token}
-    if gmail_enabled and gmail_app_password:
+    if gmail_enabled:
         secrets_data["gmail"] = {
             "address": gmail_address,
-            "app_password": gmail_app_password,
+        }
+        if gmail_allow_send and gmail_app_password:
+            secrets_data["gmail"]["app_password"] = gmail_app_password
+    if trello_enabled:
+        secrets_data["trello"] = {
+            "api_key": trello_api_key,
+            "token": trello_token,
+        }
+    if notion_enabled:
+        secrets_data["notion"] = {
+            "token": notion_token,
         }
 
     with open(SECRETS_PATH, "w") as f:
@@ -413,14 +616,28 @@ def init() -> None:
     if extra:
         providers_summary += f" + {', '.join(provider_names[p] for p in extra)}"
 
+    if gmail_enabled and not gmail_allow_send:
+        gmail_status = "draft-only"
+    elif gmail_enabled:
+        gmail_status = "send+draft"
+    else:
+        gmail_status = "disabled"
+
     console.print(
         Panel(
             f"Bot name: {bot_name}\n"
             f"Tone: {tone}\n"
             f"Provider: {providers_summary}\n"
             f"Platform: {platform}\n"
-            f"Gmail: {'enabled' if gmail_enabled else 'disabled'}\n"
-            f"Obsidian: {'enabled' if obsidian_enabled else 'disabled'}",
+            f"Write approvals: {'enabled' if require_write_approval else 'disabled'}\n"
+            f"Gmail: {gmail_status}\n"
+            f"Obsidian: {'enabled' if obsidian_enabled else 'disabled'}\n"
+            f"Trello: {'enabled' if trello_enabled else 'disabled'}\n"
+            f"Notion: {'enabled' if notion_enabled else 'disabled'}\n"
+            f"HealthKit: {'enabled' if healthkit_enabled else 'disabled'}\n"
+            f"Builtins: {'enabled' if builtins_enabled else 'disabled'}\n"
+            f"Delighters: {'enabled' if delighters_enabled else 'disabled'}\n"
+            f"Google profile: {'enabled' if google_enabled else 'disabled'}",
             title="Setup Complete",
         )
     )

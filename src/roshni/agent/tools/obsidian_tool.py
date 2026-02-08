@@ -90,5 +90,6 @@ def create_obsidian_tools(vault_path: str) -> list[ToolDefinition]:
                 "required": ["query"],
             },
             function=lambda query: _search_vault(query, vault_path),
+            permission="read",
         ),
     ]

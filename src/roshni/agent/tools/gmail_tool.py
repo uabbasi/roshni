@@ -1,9 +1,59 @@
-"""Gmail tool — send emails via the existing GmailSender."""
+"""Gmail tools.
+
+Safety-first behavior:
+  - Always supports local draft creation.
+  - Sending is optional and disabled by default.
+"""
 
 from __future__ import annotations
 
+import re
+from datetime import datetime
+from pathlib import Path
+
 from roshni.agent.tools import ToolDefinition
+from roshni.core.config import Config
 from roshni.core.secrets import SecretsManager
+
+
+def _slugify(text: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9]+", "-", text.strip().lower()).strip("-")
+    return cleaned[:48] or "draft"
+
+
+def _create_email_draft(
+    recipient: str,
+    subject: str,
+    body: str,
+    *,
+    drafts_dir: str,
+    cc: str = "",
+    bcc: str = "",
+) -> str:
+    """Save an email draft to local storage."""
+    base = Path(drafts_dir).expanduser()
+    base.mkdir(parents=True, exist_ok=True)
+
+    now = datetime.now()
+    filename = f"{now.strftime('%Y-%m-%d_%H%M%S')}_{_slugify(subject)}.md"
+    path = base / filename
+
+    lines = [
+        "# Email Draft",
+        "",
+        f"- To: {recipient}",
+        f"- Subject: {subject}",
+        f"- CC: {cc or '(none)'}",
+        f"- BCC: {bcc or '(none)'}",
+        f"- Saved: {now.strftime('%Y-%m-%d %H:%M:%S')}",
+        "",
+        "## Body",
+        "",
+        body.strip(),
+        "",
+    ]
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return f"Draft saved: {path}"
 
 
 def _send_email(
@@ -25,41 +75,71 @@ def _send_email(
         return f"Failed to send email: {e}"
 
 
-def create_gmail_tools(secrets: SecretsManager) -> list[ToolDefinition]:
-    """Create email sending tool."""
-    address = secrets.get("gmail.address", "")
-    app_password = secrets.get("gmail.app_password", "")
+def create_gmail_tools(config: Config, secrets: SecretsManager) -> list[ToolDefinition]:
+    """Create Gmail tools using config-driven safety settings."""
+    tools: list[ToolDefinition] = []
 
-    if not address or not app_password:
-        return []  # Can't create tools without credentials
+    gmail_cfg = config.get("integrations.gmail", {}) or {}
+    drafts_dir = config.get("paths.email_drafts_dir", "~/.roshni/drafts/email")
 
-    return [
+    tools.append(
         ToolDefinition(
-            name="send_email",
+            name="create_email_draft",
             description=(
-                "Send an email on behalf of the user. Use this when the user asks you to "
-                "email someone. Always confirm the recipient, subject, and body before sending."
+                "Create an email draft (does NOT send). Use this for all email composition by default. "
+                "The draft is saved locally for review."
             ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "recipient": {
-                        "type": "string",
-                        "description": "Email address to send to",
-                    },
-                    "subject": {
-                        "type": "string",
-                        "description": "Email subject line",
-                    },
-                    "body": {
-                        "type": "string",
-                        "description": "Email body text",
-                    },
+                    "recipient": {"type": "string", "description": "Recipient email address"},
+                    "subject": {"type": "string", "description": "Email subject line"},
+                    "body": {"type": "string", "description": "Email body text"},
+                    "cc": {"type": "string", "description": "Optional CC addresses"},
+                    "bcc": {"type": "string", "description": "Optional BCC addresses"},
                 },
                 "required": ["recipient", "subject", "body"],
             },
-            function=lambda recipient, subject, body: _send_email(
-                recipient, subject, body, sender=address, app_password=app_password
+            function=lambda recipient, subject, body, cc="", bcc="": _create_email_draft(
+                recipient=recipient,
+                subject=subject,
+                body=body,
+                drafts_dir=drafts_dir,
+                cc=cc,
+                bcc=bcc,
             ),
-        ),
-    ]
+            permission="write",
+        )
+    )
+
+    allow_send = bool(gmail_cfg.get("allow_send", False))
+    address = secrets.get("gmail.address", "")
+    app_password = secrets.get("gmail.app_password", "")
+    if allow_send and address and app_password:
+        tools.append(
+            ToolDefinition(
+                name="send_email",
+                description=(
+                    "Send an email immediately. High-risk action: use only when the user explicitly asks to send now."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "recipient": {"type": "string", "description": "Email address to send to"},
+                        "subject": {"type": "string", "description": "Email subject line"},
+                        "body": {"type": "string", "description": "Email body text"},
+                    },
+                    "required": ["recipient", "subject", "body"],
+                },
+                function=lambda recipient, subject, body: _send_email(
+                    recipient=recipient,
+                    subject=subject,
+                    body=body,
+                    sender=address,
+                    app_password=app_password,
+                ),
+                permission="send",
+            )
+        )
+
+    return tools

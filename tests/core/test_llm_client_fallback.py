@@ -6,7 +6,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-
 # --- litellm mock setup ---
 # litellm is an optional dep not installed in dev. We create a mock module
 # with the exception classes that client.py references.

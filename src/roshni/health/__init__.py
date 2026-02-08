@@ -4,6 +4,9 @@ Health data collection and ETL framework.
 Core module (no heavy deps).  Install extras for specific features:
   - ``roshni[health]``  — pandas, requests (BaseETL, data processing)
   - ``roshni[fitbit]``  — Fitbit API collector
+
+Built-in plugin:
+  - ``apple_health_export`` — Apple Health/HealthKit XML export collector
 """
 
 from .collector import BaseCollector, HealthCollector
