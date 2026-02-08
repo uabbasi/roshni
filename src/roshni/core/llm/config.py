@@ -9,10 +9,13 @@ from dataclasses import dataclass
 
 # --- Default model names per provider ---
 
-LOCAL_MODEL = "deepseek-r1"
+LOCAL_MODEL = "ollama/deepseek-r1"
 GOOGLE_MODEL = "gemini/gemini-2.5-flash"
+GOOGLE_PRO_MODEL = "gemini/gemini-3-pro-preview"
+GOOGLE_FLASH_MODEL = "gemini/gemini-3-flash-preview"
 OPENAI_MODEL = "gpt-4o-mini"
 ANTHROPIC_MODEL = "anthropic/claude-sonnet-4-20250514"
+ANTHROPIC_OPUS_MODEL = "anthropic/claude-opus-4-20250514"
 DEEPSEEK_MODEL = "deepseek/deepseek-chat"
 XAI_MODEL = "xai/grok-2"
 GROQ_MODEL = "groq/llama-3.3-70b-versatile"
@@ -104,6 +107,8 @@ MODEL_CATALOG: dict[str, list[ModelConfig]] = {
         ModelConfig("gemini/gemini-2.0-flash", "Gemini 2.0 Flash", "gemini", False, 8192, "low"),
         ModelConfig("gemini/gemini-2.5-flash", "Gemini 2.5 Flash", "gemini", False, 64000, "low"),
         ModelConfig("gemini/gemini-2.5-pro", "Gemini 2.5 Pro", "gemini", True, 64000, "medium"),
+        ModelConfig("gemini/gemini-3-flash-preview", "Gemini 3 Flash", "gemini", False, 1048576, "low"),
+        ModelConfig("gemini/gemini-3-pro-preview", "Gemini 3 Pro", "gemini", True, 1048576, "medium"),
     ],
     "deepseek": [
         ModelConfig("deepseek/deepseek-chat", "DeepSeek Chat", "deepseek", False, 8192, "low"),

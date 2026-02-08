@@ -1,6 +1,9 @@
 """Tests for core.llm.config — model constants and token limits."""
 
 from roshni.core.llm.config import (
+    ANTHROPIC_OPUS_MODEL,
+    GOOGLE_FLASH_MODEL,
+    GOOGLE_PRO_MODEL,
     MODEL_CATALOG,
     PROVIDER_ENV_MAP,
     ModelConfig,
@@ -85,6 +88,38 @@ class TestModelCatalog:
                 assert isinstance(m, ModelConfig)
                 assert m.name
                 assert m.display_name
+
+
+class TestNewModelConstants:
+    def test_google_pro_model(self):
+        assert "gemini-3-pro" in GOOGLE_PRO_MODEL
+
+    def test_google_flash_model(self):
+        assert "gemini-3-flash" in GOOGLE_FLASH_MODEL
+
+    def test_anthropic_opus_model(self):
+        assert "claude-opus-4" in ANTHROPIC_OPUS_MODEL
+
+    def test_gemini_3_in_catalog(self):
+        gemini_models = MODEL_CATALOG["gemini"]
+        names = [m.name for m in gemini_models]
+        assert "gemini/gemini-3-pro-preview" in names
+        assert "gemini/gemini-3-flash-preview" in names
+
+    def test_gemini_3_pro_is_heavy(self):
+        gemini_models = MODEL_CATALOG["gemini"]
+        pro = next(m for m in gemini_models if "3-pro" in m.name)
+        assert pro.is_heavy is True
+
+    def test_gemini_3_flash_is_light(self):
+        gemini_models = MODEL_CATALOG["gemini"]
+        flash = next(m for m in gemini_models if "3-flash" in m.name)
+        assert flash.is_heavy is False
+
+    def test_gemini_3_output_limits(self):
+        # gemini-3 key in MODEL_OUTPUT_TOKEN_LIMITS should match
+        assert get_model_max_tokens("gemini-3-pro-preview") == 1048576
+        assert get_model_max_tokens("gemini-3-flash-preview") == 1048576
 
 
 class TestProviderEnvMap:
