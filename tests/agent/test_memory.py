@@ -7,7 +7,7 @@ import threading
 
 import pytest
 
-from roshni.agent.memory import MemoryManager, VALID_SECTIONS, create_save_memory_tool
+from roshni.agent.memory import VALID_SECTIONS, MemoryManager, create_save_memory_tool
 
 
 @pytest.fixture
@@ -23,7 +23,7 @@ def manager(memory_path):
 class TestMemoryManager:
     def test_creates_file_on_init(self, memory_path):
         assert not os.path.exists(memory_path)
-        mgr = MemoryManager(memory_path)
+        MemoryManager(memory_path)
         assert os.path.exists(memory_path)
         text = open(memory_path).read()
         assert "# Agent Memory" in text
@@ -113,7 +113,7 @@ class TestMemoryManager:
 
     def test_nonexistent_path_creates_parents(self, tmp_dir):
         deep_path = os.path.join(tmp_dir, "a", "b", "c", "MEMORY.md")
-        mgr = MemoryManager(deep_path)
+        MemoryManager(deep_path)
         assert os.path.exists(deep_path)
 
 

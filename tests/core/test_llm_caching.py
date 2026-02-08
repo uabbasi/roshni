@@ -1,7 +1,5 @@
 """Tests for core.llm.caching — provider-aware prompt caching helpers."""
 
-import pytest
-
 from roshni.core.llm.caching import (
     build_cached_system_message,
     build_system_content_blocks,
