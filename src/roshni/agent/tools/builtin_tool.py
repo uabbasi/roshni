@@ -9,6 +9,8 @@ import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
 
+from duckduckgo_search import DDGS
+
 from roshni.agent.tools import ToolDefinition
 
 
@@ -78,13 +80,8 @@ def _web_search(query: str, limit: int = 5, auto_fetch: bool = True) -> str:
     if not re.search(r"\b20\d{2}\b", q):
         q = f"{q} {datetime.datetime.now(datetime.UTC).year}"
 
-    # Try real DDG search via duckduckgo-search package
     try:
-        from duckduckgo_search import DDGS
-
         results = DDGS().text(q, max_results=limit)
-    except ImportError:
-        return "Web search requires the 'duckduckgo-search' package. Install it with: pip install roshni[web]"
     except Exception as e:
         return f"Web search failed: {e}"
 

@@ -86,9 +86,11 @@ StorageError                         # core/storage/base.py — separate tree
 └── StorageQuotaError
 ```
 
-## Optional Extras
+## Dependencies
 
-Core has minimal deps (PyYAML, loguru, python-dotenv, aiofiles). Everything else is opt-in:
+Core install includes everything needed to run: LLM (litellm), Telegram, Google APIs, web search (duckduckgo-search).
+
+**Optional extras** for specialized/heavy features:
 
 | Extra | What it adds |
 |-------|-------------|
@@ -99,12 +101,7 @@ Core has minimal deps (PyYAML, loguru, python-dotenv, aiofiles). Everything else
 | `journal-chroma` | chromadb |
 | `financial` | pandas |
 | `financial-full` | yfinance, duckdb, cvxpy — market data + optimization |
-| `llm` | litellm |
-| `agent` | litellm |
 | `agent-langchain` | langchain, langchain-core |
-| `gateway-telegram` | python-telegram-bot, apscheduler |
-| `google` | gspread, google-api-python-client, google-auth-oauthlib |
-| `storage-gcs` | google-cloud-storage |
 | `all` | Everything above |
 | `dev` | pytest, ruff, mypy + subset of extras |
 

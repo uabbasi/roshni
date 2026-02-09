@@ -38,40 +38,37 @@ def test_search_web_schema_has_auto_fetch():
 def test_auto_year_appended_when_missing():
     """Query without a 4-digit year gets current year appended."""
     current_year = str(datetime.datetime.now(datetime.UTC).year)
-    mock_ddgs = MagicMock()
-    mock_ddgs.return_value.text.return_value = []
+    mock_ddgs_instance = MagicMock()
+    mock_ddgs_instance.text.return_value = []
 
-    with patch.dict("sys.modules", {"duckduckgo_search": MagicMock(DDGS=mock_ddgs)}):
+    with patch("roshni.agent.tools.builtin_tool.DDGS", return_value=mock_ddgs_instance):
         _web_search("best python frameworks", auto_fetch=False)
 
-    call_args = mock_ddgs.return_value.text.call_args
-    query_sent = call_args[0][0]
+    query_sent = mock_ddgs_instance.text.call_args[0][0]
     assert current_year in query_sent
 
 
 def test_auto_year_not_appended_when_present():
     """Query that already contains a year should not get another year."""
-    mock_ddgs = MagicMock()
-    mock_ddgs.return_value.text.return_value = []
+    mock_ddgs_instance = MagicMock()
+    mock_ddgs_instance.text.return_value = []
 
-    with patch.dict("sys.modules", {"duckduckgo_search": MagicMock(DDGS=mock_ddgs)}):
+    with patch("roshni.agent.tools.builtin_tool.DDGS", return_value=mock_ddgs_instance):
         _web_search("python trends 2025", auto_fetch=False)
 
-    call_args = mock_ddgs.return_value.text.call_args
-    query_sent = call_args[0][0]
+    query_sent = mock_ddgs_instance.text.call_args[0][0]
     assert query_sent == "python trends 2025"
 
 
-def test_search_uses_ddgs_when_available():
-    """When duckduckgo-search is installed, DDGS().text() is called."""
+def test_search_uses_ddgs():
+    """DDGS().text() is called and results are formatted."""
     mock_ddgs_instance = MagicMock()
     mock_ddgs_instance.text.return_value = [
         {"title": "Result 1", "href": "https://example.com/1", "body": "Body 1"},
         {"title": "Result 2", "href": "https://example.com/2", "body": "Body 2"},
     ]
-    mock_ddgs_class = MagicMock(return_value=mock_ddgs_instance)
 
-    with patch.dict("sys.modules", {"duckduckgo_search": MagicMock(DDGS=mock_ddgs_class)}):
+    with patch("roshni.agent.tools.builtin_tool.DDGS", return_value=mock_ddgs_instance):
         result = _web_search("test query 2025", limit=5, auto_fetch=False)
 
     assert "Result 1" in result
@@ -80,32 +77,15 @@ def test_search_uses_ddgs_when_available():
     mock_ddgs_instance.text.assert_called_once()
 
 
-def test_fallback_when_ddgs_not_installed():
-    """When duckduckgo-search is not installed, a helpful error is returned."""
-    import sys
-
-    # Temporarily remove duckduckgo_search from modules if present
-    saved = sys.modules.pop("duckduckgo_search", None)
-    try:
-        with patch.dict("sys.modules", {"duckduckgo_search": None}):
-            result = _web_search("test query 2025", auto_fetch=False)
-        assert "duckduckgo-search" in result
-        assert "pip install" in result
-    finally:
-        if saved is not None:
-            sys.modules["duckduckgo_search"] = saved
-
-
 def test_auto_fetch_appends_content():
     """When auto_fetch=True, first result URL content is appended."""
     mock_ddgs_instance = MagicMock()
     mock_ddgs_instance.text.return_value = [
         {"title": "Page", "href": "https://example.com/page", "body": "Summary"},
     ]
-    mock_ddgs_class = MagicMock(return_value=mock_ddgs_instance)
 
     with (
-        patch.dict("sys.modules", {"duckduckgo_search": MagicMock(DDGS=mock_ddgs_class)}),
+        patch("roshni.agent.tools.builtin_tool.DDGS", return_value=mock_ddgs_instance),
         patch(
             "roshni.agent.tools.builtin_tool._fetch_webpage",
             return_value="Fetched: https://example.com/page\n\nPage content here",
@@ -123,10 +103,9 @@ def test_auto_fetch_silently_skips_on_failure():
     mock_ddgs_instance.text.return_value = [
         {"title": "Page", "href": "https://example.com/page", "body": "Summary"},
     ]
-    mock_ddgs_class = MagicMock(return_value=mock_ddgs_instance)
 
     with (
-        patch.dict("sys.modules", {"duckduckgo_search": MagicMock(DDGS=mock_ddgs_class)}),
+        patch("roshni.agent.tools.builtin_tool.DDGS", return_value=mock_ddgs_instance),
         patch("roshni.agent.tools.builtin_tool._fetch_webpage", side_effect=Exception("Connection refused")),
     ):
         result = _web_search("test 2025", auto_fetch=True)
@@ -141,10 +120,9 @@ def test_auto_fetch_disabled():
     mock_ddgs_instance.text.return_value = [
         {"title": "Page", "href": "https://example.com/page", "body": "Summary"},
     ]
-    mock_ddgs_class = MagicMock(return_value=mock_ddgs_instance)
 
     with (
-        patch.dict("sys.modules", {"duckduckgo_search": MagicMock(DDGS=mock_ddgs_class)}),
+        patch("roshni.agent.tools.builtin_tool.DDGS", return_value=mock_ddgs_instance),
         patch("roshni.agent.tools.builtin_tool._fetch_webpage") as mock_fetch,
     ):
         result = _web_search("test 2025", auto_fetch=False)
@@ -157,9 +135,8 @@ def test_no_results_message():
     """When DDGS returns empty results, a no-results message is shown."""
     mock_ddgs_instance = MagicMock()
     mock_ddgs_instance.text.return_value = []
-    mock_ddgs_class = MagicMock(return_value=mock_ddgs_instance)
 
-    with patch.dict("sys.modules", {"duckduckgo_search": MagicMock(DDGS=mock_ddgs_class)}):
+    with patch("roshni.agent.tools.builtin_tool.DDGS", return_value=mock_ddgs_instance):
         result = _web_search("obscure nonexistent thing 2025", auto_fetch=False)
 
     assert "No web results found" in result

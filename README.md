@@ -11,7 +11,7 @@ You need Python 3.11+.
 ### 1. Install
 
 ```bash
-pip install "roshni[bot]"
+pip install roshni
 ```
 
 ### 2. Run Setup Wizard
@@ -104,13 +104,17 @@ roshni init
 
 ## Optional Extras
 
+The base install includes everything you need: LLM, Telegram, Google APIs, web search. These extras add specialized features:
+
 | Extra | What it adds |
 |---|---|
-| `bot` | Agent + Telegram gateway |
-| `llm` | LiteLLM multi-provider client |
-| `fitbit` | Fitbit collector plugin |
-| `google` | Google API wrappers (Sheets/Drive/Gmail/GCS) |
-| `all` | Everything |
+| `health` | Health data collection (pandas) |
+| `fitbit` | Fitbit steps/sleep/heart rate |
+| `journal` | Journal RAG with embeddings |
+| `financial` | Financial calculators |
+| `financial-full` | Market data + portfolio optimization |
+| `agent-langchain` | LangChain integration |
+| `all` | Everything above |
 
 ## Development
 
