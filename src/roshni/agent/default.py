@@ -305,7 +305,7 @@ class DefaultAgent(BaseAgent):
             # Add assistant response to history
             msg_dict: dict[str, Any] = {"role": "assistant"}
             if assistant_message.content:
-                msg_dict["content"] = assistant_message.content
+                msg_dict["content"] = self._normalize_content(assistant_message.content)
             if hasattr(assistant_message, "tool_calls") and assistant_message.tool_calls:
                 msg_dict["tool_calls"] = [
                     {
@@ -373,7 +373,7 @@ class DefaultAgent(BaseAgent):
                     {
                         "role": "tool",
                         "tool_call_id": tool_call.id,
-                        "content": result,
+                        "content": self._normalize_content(result),
                     }
                 )
 
@@ -422,6 +422,33 @@ class DefaultAgent(BaseAgent):
         messages.extend(history)
 
         return messages
+
+    # ------------------------------------------------------------------
+    # Content normalization
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _normalize_content(content: Any) -> str:
+        """Ensure message content is a string for API compatibility.
+
+        LiteLLM wraps multiple providers; Gemini in particular can return
+        content as a dict (``{"text": "..."}``), which violates the OpenAI
+        message schema expected downstream.
+        """
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            # Array of content blocks — extract text parts
+            parts = []
+            for block in content:
+                if isinstance(block, dict):
+                    parts.append(block.get("text", str(block)))
+                else:
+                    parts.append(str(block))
+            return "\n".join(parts) if parts else ""
+        if isinstance(content, dict):
+            return content.get("text", json.dumps(content))
+        return str(content)
 
     # ------------------------------------------------------------------
     # Empty response synthesis
