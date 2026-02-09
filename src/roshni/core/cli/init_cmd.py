@@ -7,16 +7,123 @@ import stat
 from pathlib import Path
 
 import click
+import questionary
 import yaml
+from questionary import Choice
+from rich.console import Console
+from rich.panel import Panel
 
 ROSHNI_DIR = Path.home() / ".roshni"
 CONFIG_PATH = ROSHNI_DIR / "config.yaml"
 SECRETS_PATH = ROSHNI_DIR / "secrets.yaml"
-PERSONA_DIR = ROSHNI_DIR / "persona"
+
+console = Console()
+
+# ---------------------------------------------------------------------------
+# Provider metadata
+# ---------------------------------------------------------------------------
+
+ALL_PROVIDERS = ["gemini", "openai", "anthropic", "deepseek", "xai", "groq", "local"]
+
+PROVIDER_DISPLAY: dict[str, str] = {
+    "gemini": "Google Gemini",
+    "openai": "OpenAI (GPT)",
+    "anthropic": "Anthropic (Claude)",
+    "deepseek": "DeepSeek",
+    "xai": "xAI (Grok)",
+    "groq": "Groq",
+    "local": "Ollama (local)",
+}
+
+PROVIDER_SETUP_GUIDES: dict[str, str] = {
+    "gemini": (
+        "1. Go to: https://aistudio.google.com/apikey\n"
+        "2. Sign in with your Google account\n"
+        "3. Click \"Create API Key\"\n"
+        "4. Select or create a project, then click \"Create\"\n"
+        "5. Copy the key and paste it below\n"
+        "\n"
+        "Free tier available — no credit card needed."
+    ),
+    "openai": (
+        "1. Go to: https://platform.openai.com/api-keys\n"
+        "2. Sign in or create an account\n"
+        "3. Click \"Create new secret key\"\n"
+        "4. Copy the key and paste it below\n"
+        "\n"
+        "Free trial credits available for new accounts."
+    ),
+    "anthropic": (
+        "1. Go to: https://console.anthropic.com/settings/keys\n"
+        "2. Sign in or create an account\n"
+        "3. Click \"Create Key\"\n"
+        "4. Copy the key and paste it below"
+    ),
+    "deepseek": (
+        "1. Go to: https://platform.deepseek.com/api_keys\n"
+        "2. Sign in or create an account\n"
+        "3. Create an API key\n"
+        "4. Copy the key and paste it below\n"
+        "\n"
+        "Very affordable pricing."
+    ),
+    "xai": (
+        "1. Go to: https://console.x.ai/\n"
+        "2. Sign in with your X account\n"
+        "3. Navigate to API keys\n"
+        "4. Create a key and paste it below"
+    ),
+    "groq": (
+        "1. Go to: https://console.groq.com/keys\n"
+        "2. Sign in or create an account\n"
+        "3. Click \"Create API Key\"\n"
+        "4. Copy the key and paste it below\n"
+        "\n"
+        "Free tier available — very fast inference."
+    ),
+    "local": (
+        "1. Install Ollama: https://ollama.com/download\n"
+        "2. Run: ollama pull deepseek-r1\n"
+        "3. That's it — no API key needed!"
+    ),
+}
+
+TONE_DESCRIPTIONS: dict[str, str] = {
+    "friendly": "Casual and approachable — like a helpful friend",
+    "professional": "Precise and efficient — like a great executive assistant",
+    "warm": "Empathetic and thoughtful — calm and caring",
+    "witty": "Sharp and clever — dry humor with substance",
+}
+
+SAFETY_LEVELS = {
+    "balanced": {
+        "label": "Balanced (recommended)",
+        "description": (
+            "Can read and search everything. Can create drafts, tasks, and notes. "
+            "Asks for your OK before sending emails or deleting anything."
+        ),
+        "tier": "interact",
+    },
+    "readonly": {
+        "label": "Read only",
+        "description": "Can search and read your data, but can't create or change anything.",
+        "tier": "observe",
+    },
+    "full": {
+        "label": "Full access",
+        "description": "Can do everything including send emails and delete items.",
+        "tier": "full",
+    },
+}
+
+PERMISSION_DOMAINS = ["gmail", "trello", "notion", "obsidian", "health", "tasks", "vault"]
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 
 def _load_existing_config() -> dict:
-    """Load existing config if present."""
     if CONFIG_PATH.exists():
         with open(CONFIG_PATH) as f:
             return yaml.safe_load(f) or {}
@@ -24,7 +131,6 @@ def _load_existing_config() -> dict:
 
 
 def _load_existing_secrets() -> dict:
-    """Load existing secrets if present."""
     if SECRETS_PATH.exists():
         with open(SECRETS_PATH) as f:
             return yaml.safe_load(f) or {}
@@ -32,17 +138,13 @@ def _load_existing_secrets() -> dict:
 
 
 def _mask_key(key: str) -> str:
-    """Show first 4 and last 4 chars of a key."""
     if len(key) <= 12:
         return key[:4] + "..." + key[-2:]
     return key[:4] + "..." + key[-4:]
 
 
 def _validate_api_key(provider: str, api_key: str) -> bool | None:
-    """Make a test LLM call to validate the API key.
-
-    Returns True if valid, False if invalid, None if validation was skipped.
-    """
+    """Returns True if valid, False if invalid, None if skipped."""
     try:
         import litellm
 
@@ -57,125 +159,158 @@ def _validate_api_key(provider: str, api_key: str) -> bool | None:
         )
         return True
     except ImportError:
-        # litellm not installed — skip validation
         return None
     except Exception as e:
         click.echo(f"  API key validation failed: {e}")
         return False
 
 
-def _prompt_choice(prompt: str, choices: list[str], default: str = "") -> str:
-    """Prompt for a choice from a numbered list."""
-    click.echo(f"\n{prompt}")
-    for i, c in enumerate(choices, 1):
-        marker = " (default)" if c == default else ""
-        click.echo(f"  {i}. {c}{marker}")
-
-    while True:
-        raw = click.prompt("  Choose", default=str(choices.index(default) + 1) if default in choices else "1")
-        try:
-            idx = int(raw) - 1
-            if 0 <= idx < len(choices):
-                return choices[idx]
-        except ValueError:
-            # Maybe they typed the name
-            if raw in choices:
-                return raw
-        click.echo(f"  Please enter a number 1-{len(choices)}")
+def _show_guide(title: str, body: str) -> None:
+    console.print()
+    console.print(Panel(body, title=title, border_style="cyan"))
+    console.print()
 
 
-@click.command()
-def init() -> None:
-    """Set up your personal AI assistant."""
+def _ask_text(message: str, default: str = "") -> str:
+    result = questionary.text(message, default=default).ask()
+    if result is None:
+        raise click.Abort()
+    return result
+
+
+def _ask_select(message: str, choices: list[Choice], **kwargs) -> str:
+    result = questionary.select(message, choices=choices, **kwargs).ask()
+    if result is None:
+        raise click.Abort()
+    return result
+
+
+def _ask_confirm(message: str, default: bool = True) -> bool:
+    result = questionary.confirm(message, default=default).ask()
+    if result is None:
+        raise click.Abort()
+    return result
+
+
+def _ask_checkbox(message: str, choices: list[Choice]) -> list[str]:
+    result = questionary.checkbox(message, choices=choices).ask()
+    if result is None:
+        raise click.Abort()
+    return result
+
+
+def _prompt_api_key(provider: str, existing: str = "") -> str:
+    from roshni.core.llm.config import PROVIDER_ENV_MAP
+
+    if existing:
+        click.echo(f"  {PROVIDER_DISPLAY[provider]} key on file: {_mask_key(existing)}")
+        if not _ask_confirm("  Change it?", default=False):
+            return existing
+
+    guide = PROVIDER_SETUP_GUIDES.get(provider, "")
+    if guide:
+        _show_guide(f"How to get your {PROVIDER_DISPLAY[provider]} API key", guide)
+
+    env_var = PROVIDER_ENV_MAP.get(provider, "")
+    hint = f" (or set {env_var})" if env_var else ""
+    key = questionary.password(f"  Paste your {PROVIDER_DISPLAY[provider]} API key{hint}:").ask()
+    if key is None:
+        raise click.Abort()
+
     try:
-        from rich.console import Console
-        from rich.panel import Panel
+        import litellm  # noqa: F401
+
+        can_validate = True
     except ImportError:
-        raise click.ClickException("Install rich: pip install rich")
+        can_validate = False
 
-    console = Console()
-    existing_config = _load_existing_config()
-    existing_secrets = _load_existing_secrets()
-    is_reconfig = bool(existing_config)
+    if can_validate:
+        click.echo("  Validating...")
+        validation = _validate_api_key(provider, key)
+        if validation is True:
+            console.print("  [green]Valid![/green]")
+        elif validation is False:
+            if not _ask_confirm("  Key validation failed. Use it anyway?", default=False):
+                raise click.Abort()
+    return key
 
-    # Welcome
+
+# ---------------------------------------------------------------------------
+# Wizard steps
+# ---------------------------------------------------------------------------
+
+
+def _step_welcome(is_reconfig: bool) -> None:
+    """Step 1: Welcome."""
     if is_reconfig:
-        console.print(Panel("Reconfiguring your assistant. Existing values shown as defaults.", title="Roshni Setup"))
+        console.print(
+            Panel(
+                "Let's update your assistant's settings.\nExisting values are shown as defaults.",
+                title="Roshni Setup",
+            )
+        )
     else:
         console.print(
             Panel(
-                "Let's set up your personal AI assistant.\nThis takes about 5 minutes.",
+                "Let's set up your personal AI assistant step by step.\n"
+                "Use arrow keys to select options. Press Enter to confirm.",
                 title="Welcome to Roshni",
             )
         )
 
-    # --- Bot name ---
+
+def _step_identity(existing_config: dict) -> tuple[str, str, str]:
+    """Step 2: Bot name, user name, personality."""
+    console.print("\n[bold]Step 1 · Identity[/bold]")
+
     default_name = existing_config.get("bot", {}).get("name", "Roshni")
-    bot_name = click.prompt("\nWhat should your bot be called?", default=default_name)
+    bot_name = _ask_text("What should your bot be called?", default=default_name)
 
-    # --- User name ---
-    default_user = existing_config.get("user", {}).get("name", "")
-    user_name = click.prompt("What's your name?", default=default_user or os.environ.get("USER", ""))
+    default_user = existing_config.get("user", {}).get("name", "") or os.environ.get("USER", "")
+    user_name = _ask_text("What's your name?", default=default_user)
 
-    # --- Tone ---
-    tones = ["friendly", "professional", "warm", "witty"]
-    tone_descriptions = {
-        "friendly": "Casual and approachable — like a helpful friend",
-        "professional": "Precise and efficient — like a great executive assistant",
-        "warm": "Empathetic and thoughtful — calm and caring",
-        "witty": "Sharp and clever — dry humor with substance",
-    }
+    tones = list(TONE_DESCRIPTIONS.keys()) + ["custom"]
     default_tone = existing_config.get("bot", {}).get("tone", "friendly")
-    click.echo("\nWhat personality should your bot have?")
-    for i, t in enumerate(tones, 1):
-        marker = " (default)" if t == default_tone else ""
-        click.echo(f"  {i}. {t} — {tone_descriptions[t]}{marker}")
 
-    tone_input = click.prompt("  Choose", default=str(tones.index(default_tone) + 1))
-    try:
-        tone = tones[int(tone_input) - 1]
-    except (ValueError, IndexError):
-        tone = tone_input if tone_input in tones else default_tone
+    tone_choices = [
+        Choice(title=f"{t.capitalize()} — {TONE_DESCRIPTIONS[t]}", value=t)
+        for t in TONE_DESCRIPTIONS
+    ]
+    tone_choices.append(Choice(title="Custom — describe your own", value="custom"))
 
-    # --- Security ---
-    security_cfg = existing_config.get("security", {}) or {}
-    require_write_approval = click.confirm(
-        "\nRequire approval before write/send actions? (recommended)",
-        default=security_cfg.get("require_write_approval", True),
+    tone = _ask_select(
+        "What personality should your bot have?",
+        tone_choices,
+        default=default_tone if default_tone in tones else "friendly",
     )
 
-    # --- LLM providers ---
-    from roshni.core.llm.config import PROVIDER_ENV_MAP
+    if tone == "custom":
+        tone = _ask_text("Describe the personality you'd like (e.g., 'sarcastic but kind'):")
 
-    all_providers = ["anthropic", "openai", "gemini", "deepseek", "xai", "groq", "local"]
-    provider_names = {
-        "anthropic": "Anthropic (Claude)",
-        "openai": "OpenAI (GPT)",
-        "gemini": "Google (Gemini)",
-        "deepseek": "DeepSeek",
-        "xai": "xAI (Grok)",
-        "groq": "Groq",
-        "local": "Local (Ollama)",
-    }
+    return bot_name, user_name, tone
 
-    # Read existing multi-provider config or legacy format
+
+def _step_ai_provider(existing_config: dict, existing_secrets: dict) -> tuple[str, str, dict[str, str]]:
+    """Step 3: AI provider + API keys. Returns (provider, fallback, {provider: key})."""
+    console.print("\n[bold]Step 2 · AI Provider[/bold]")
+
     existing_llm = existing_config.get("llm", {})
-    default_provider = existing_llm.get("default", "") or existing_llm.get("provider", "anthropic")
+    default_provider = existing_llm.get("default", "") or existing_llm.get("provider", "gemini")
 
-    click.echo("\nWhich AI provider do you want as your default?")
-    for i, p in enumerate(all_providers, 1):
-        marker = " (default)" if p == default_provider else ""
-        click.echo(f"  {i}. {provider_names[p]}{marker}")
+    provider_choices = []
+    for p in ALL_PROVIDERS:
+        label = PROVIDER_DISPLAY[p]
+        if p == "gemini":
+            label += "  (recommended — free tier available)"
+        provider_choices.append(Choice(title=label, value=p))
 
-    default_idx = str(all_providers.index(default_provider) + 1) if default_provider in all_providers else "1"
-    provider_input = click.prompt("  Choose", default=default_idx)
-    try:
-        provider = all_providers[int(provider_input) - 1]
-    except (ValueError, IndexError):
-        provider = provider_input if provider_input in all_providers else default_provider
+    provider = _ask_select(
+        "Which AI provider do you want to use?",
+        provider_choices,
+        default=default_provider if default_provider in ALL_PROVIDERS else "gemini",
+    )
 
-    # --- API keys (multi-provider) ---
-    # Read existing keys from new or legacy format
+    # Collect existing API keys
     existing_api_keys: dict = existing_secrets.get("llm", {}).get("api_keys", {}) or {}
     if not existing_api_keys:
         legacy_key = existing_secrets.get("llm", {}).get("api_key", "")
@@ -183,436 +318,277 @@ def init() -> None:
         if legacy_key and legacy_provider:
             existing_api_keys = {legacy_provider: legacy_key}
 
-    configured_providers: dict[str, str] = {}  # provider -> api_key
+    configured: dict[str, str] = {}
 
-    def _prompt_api_key(prov: str, existing: str = "") -> str:
-        """Prompt for an API key for a provider."""
-        if existing:
-            click.echo(f"\n  {provider_names[prov]} key on file: {_mask_key(existing)}")
-            if not click.confirm("  Change it?", default=False):
-                return existing
-
-        env_var = PROVIDER_ENV_MAP.get(prov, "")
-        hint = f" (or set {env_var})" if env_var else ""
-        key = click.prompt(f"  Paste your {provider_names[prov]} API key{hint}", hide_input=True)
-
-        click.echo("  Validating...")
-        validation = _validate_api_key(prov, key)
-        if validation is True:
-            console.print("  [green]Valid![/green]")
-        elif validation is None:
-            click.echo("  Skipped (install roshni\\[llm] to validate)")
-        else:
-            if not click.confirm("  Key validation failed. Use it anyway?", default=False):
-                raise click.Abort()
-        return key
-
-    # Default provider API key (skip for local)
+    # Primary key
     if provider != "local":
-        existing_key = existing_api_keys.get(provider, "")
-        configured_providers[provider] = _prompt_api_key(provider, existing_key)
+        configured[provider] = _prompt_api_key(provider, existing_api_keys.get(provider, ""))
+    else:
+        _show_guide("Ollama Setup", PROVIDER_SETUP_GUIDES["local"])
 
-    # --- Fallback provider ---
+    # Fallback
     existing_fallback = existing_llm.get("fallback", "")
     fallback_provider = ""
-    fallback_choices = [p for p in all_providers if p != provider and p != "local"]
+    if _ask_confirm("Add a fallback provider? (used when default is unavailable)", default=bool(existing_fallback)):
+        fallback_options = [p for p in ALL_PROVIDERS if p != provider and p != "local"]
+        fb_choices = [Choice(title=PROVIDER_DISPLAY[p], value=p) for p in fallback_options]
+        fallback_provider = _ask_select(
+            "Which fallback provider?",
+            fb_choices,
+            default=existing_fallback if existing_fallback in fallback_options else fallback_options[0],
+        )
+        configured[fallback_provider] = _prompt_api_key(
+            fallback_provider, existing_api_keys.get(fallback_provider, "")
+        )
 
-    if click.confirm("\nAdd a fallback provider? (used when default fails)", default=bool(existing_fallback)):
-        click.echo("  Choose fallback provider:")
-        for i, p in enumerate(fallback_choices, 1):
-            marker = " (current)" if p == existing_fallback else ""
-            click.echo(f"    {i}. {provider_names[p]}{marker}")
+    return provider, fallback_provider, configured
 
-        fb_idx = fallback_choices.index(existing_fallback) + 1 if existing_fallback in fallback_choices else 1
-        fb_default = str(fb_idx)
-        fb_input = click.prompt("    Choose", default=fb_default)
-        try:
-            fallback_provider = fallback_choices[int(fb_input) - 1]
-        except (ValueError, IndexError):
-            fallback_provider = fb_input if fb_input in fallback_choices else ""
 
-        if fallback_provider:
-            existing_fb_key = existing_api_keys.get(fallback_provider, "")
-            configured_providers[fallback_provider] = _prompt_api_key(fallback_provider, existing_fb_key)
-
-    # --- Additional providers ---
-    remaining = [p for p in all_providers if p not in configured_providers and p != "local"]
-    while remaining and click.confirm("\nAdd another provider?", default=False):
-        click.echo("  Available providers:")
-        for i, p in enumerate(remaining, 1):
-            click.echo(f"    {i}. {provider_names[p]}")
-
-        extra_input = click.prompt("    Choose", default="1")
-        try:
-            extra_provider = remaining[int(extra_input) - 1]
-        except (ValueError, IndexError):
-            continue
-
-        existing_extra_key = existing_api_keys.get(extra_provider, "")
-        configured_providers[extra_provider] = _prompt_api_key(extra_provider, existing_extra_key)
-        remaining = [p for p in remaining if p != extra_provider]
-
-    # --- Platform ---
-    default_platform = existing_config.get("platform", "telegram")
-    platform = _prompt_choice(
-        "Where will your bot live?",
-        ["telegram", "terminal-only"],
-        default=default_platform,
+def _step_vault(existing_config: dict, bot_name: str) -> tuple[str, str]:
+    """Step 4: Bot's Brain (vault). Returns (vault_path, agent_dir)."""
+    console.print("\n[bold]Step 3 · Bot's Brain[/bold]")
+    console.print(
+        "  Your bot stores its memory, tasks, and knowledge in a folder.\n"
+        "  If you use Obsidian, point this to your vault and your bot can search your notes too."
     )
 
-    # --- Telegram setup ---
-    telegram_token = existing_secrets.get("telegram", {}).get("bot_token", "")
-    tg_cfg = existing_config.get("telegram", {})
-    tg_uids = tg_cfg.get("allowed_user_ids", [])
-    telegram_user_id = tg_uids[0] if tg_uids else ""
-
-    if platform == "telegram":
-        if not telegram_token or click.confirm("\nSet up Telegram bot token?", default=not bool(telegram_token)):
-            console.print(
-                Panel(
-                    "1. Open Telegram and search for @BotFather\n"
-                    "2. Send /newbot and follow the prompts\n"
-                    "3. Copy the token BotFather gives you",
-                    title="Create a Telegram Bot",
-                )
-            )
-            telegram_token = click.prompt("Paste your bot token")
-
-        if not telegram_user_id or click.confirm("Set up your Telegram user ID?", default=not bool(telegram_user_id)):
-            console.print(
-                Panel(
-                    "1. Open Telegram and search for @userinfobot\n"
-                    "2. Send it any message\n"
-                    "3. It will reply with your user ID (a number)",
-                    title="Find Your Telegram User ID",
-                )
-            )
-            while True:
-                telegram_user_id = click.prompt("Your Telegram user ID").strip()
-                if telegram_user_id.isdigit():
-                    break
-                click.echo("Please enter numbers only (example: 123456789).")
-
-        if not telegram_user_id:
-            raise click.ClickException(
-                "Telegram requires an allowed user ID for security. Re-run and provide your Telegram user ID."
-            )
-
-    # --- Vault setup ---
     existing_vault = existing_config.get("vault", {}) or {}
-    existing_vault_path = existing_vault.get("path", "")
-    existing_agent_dir = existing_vault.get("agent_dir", "")
+    default_path = existing_vault.get("path", "") or "~/Obsidian"
+    default_agent = existing_vault.get("agent_dir", "") or bot_name.lower().replace(" ", "-")
 
-    click.echo("\nVault configuration (the agent's brain lives in your Obsidian vault):")
-    vault_path = click.prompt(
-        "  Path to your Obsidian vault",
-        default=existing_vault_path or "~/Obsidian",
-    )
+    vault_path = _ask_text("Folder path:", default=default_path)
     vault_path = str(Path(vault_path).expanduser())
 
-    agent_dir = click.prompt(
-        "  Agent directory name in vault",
-        default=existing_agent_dir or bot_name.lower().replace(" ", "-"),
-    )
+    vault_p = Path(vault_path)
+    if vault_p.is_dir():
+        console.print(f"  [green]Found:[/green] {vault_path}")
+    else:
+        console.print("  [yellow]Folder doesn't exist yet — it will be created during setup.[/yellow]")
 
-    # --- Integrations ---
-    click.echo("\nOptional integrations (you can add these later):")
+    agent_dir = _ask_text("Bot's subdirectory name:", default=default_agent)
+
+    return vault_path, agent_dir
+
+
+def _step_integrations(
+    existing_config: dict, existing_secrets: dict
+) -> tuple[dict, dict]:
+    """Step 5: Integrations. Returns (integrations_config, secrets_updates)."""
+    console.print("\n[bold]Step 4 · Integrations[/bold]")
+    console.print("  Connect the services you want your bot to help with. You can add more later.\n")
+
     integrations: dict = existing_config.get("integrations", {}) or {}
+    secrets_updates: dict = {}
 
-    # Gmail
+    # --- 5a: Google Services (Gmail + Workspace combined) ---
+    google_cfg = integrations.get("google_workspace", {}) or {}
     gmail_cfg = integrations.get("gmail", {}) or {}
-    gmail_enabled = click.confirm(
-        "  Enable Gmail assistant? (draft mode by default)",
-        default=gmail_cfg.get("enabled", False),
-    )
+    google_default = google_cfg.get("enabled", False) or gmail_cfg.get("enabled", False)
+
+    google_enabled = _ask_confirm("Connect Google services? (Gmail, Calendar, Docs, Sheets)", default=google_default)
+
+    gmail_enabled = False
     gmail_mode = "draft"
     gmail_allow_send = False
     gmail_address = existing_secrets.get("gmail", {}).get("address", "")
     gmail_app_password = existing_secrets.get("gmail", {}).get("app_password", "")
-    if gmail_enabled:
-        click.echo("    Gmail default is draft-only (no sending).")
-        gmail_address = click.prompt("    Gmail address (for drafting context)", default=gmail_address)
-        gmail_allow_send = click.confirm(
-            "    Allow direct sending too? (higher risk)",
-            default=gmail_cfg.get("allow_send", False),
+    google_ws_enabled = False
+    google_credentials_path = str(
+        Path(google_cfg.get("credentials_path", "~/.roshni/google/client_secret.json")).expanduser()
+    )
+    google_token_path = str(
+        Path(google_cfg.get("token_path", "~/.roshni/google/token.pickle")).expanduser()
+    )
+    google_scopes: dict = google_cfg.get("scopes", {}) or {}
+    selected_services: list[str] = []
+
+    if google_enabled:
+        _show_guide(
+            "Google Cloud Setup (one-time)",
+            "1. Go to: https://console.cloud.google.com/\n"
+            "2. Create a new project (or pick an existing one)\n"
+            "3. Enable the APIs you need:\n"
+            "     → Gmail API, Google Calendar API, Google Docs API, Google Sheets API\n"
+            "4. Go to APIs & Services → OAuth consent screen → set up for External\n"
+            "5. Go to Credentials → Create OAuth client ID → Desktop app\n"
+            "6. Download the JSON file and save it\n"
+            "\n"
+            "You only need to do this once for all Google services.",
         )
-        if gmail_allow_send:
-            gmail_mode = "send"
-            change_pw = not gmail_app_password or click.confirm(
-                "    Set/change Gmail App Password?",
-                default=not bool(gmail_app_password),
+
+        google_credentials_path = str(
+            Path(
+                _ask_text("Path to your downloaded OAuth credentials JSON:", default=google_credentials_path)
+            ).expanduser()
+        )
+
+        gmail_address = _ask_text("Your Gmail address:", default=gmail_address)
+
+        service_choices = [
+            Choice("Gmail", checked=gmail_cfg.get("enabled", True)),
+            Choice("Calendar", checked=google_scopes.get("calendar_rw", True)),
+            Choice("Docs", checked=google_scopes.get("docs_readonly", True)),
+            Choice("Sheets", checked=google_scopes.get("sheets_readonly", True)),
+        ]
+        selected_services = _ask_checkbox("Which Google services?", service_choices)
+
+        gmail_enabled = "Gmail" in selected_services
+        google_ws_enabled = True
+
+        if gmail_enabled:
+            gmail_allow_send = _ask_confirm(
+                "Allow your bot to send emails directly? (default is draft-only)", default=False
             )
-            if change_pw:
-                console.print(
-                    Panel(
+            gmail_mode = "send" if gmail_allow_send else "draft"
+            if gmail_allow_send:
+                if not gmail_app_password or _ask_confirm("Set/change Gmail App Password?", default=True):
+                    _show_guide(
+                        "Gmail App Password",
                         "1. Go to myaccount.google.com → Security → App Passwords\n"
                         "2. Create a new app password for 'Mail'\n"
                         "3. Copy the 16-character password",
-                        title="Gmail App Password",
                     )
-                )
-                gmail_app_password = click.prompt("    App Password", hide_input=True)
+                    pw = questionary.password("  Gmail App Password:").ask()
+                    if pw is None:
+                        raise click.Abort()
+                    gmail_app_password = pw
 
-    # Obsidian
-    obsidian_enabled = integrations.get("obsidian", {}).get("enabled", False)
-    obsidian_path = integrations.get("obsidian", {}).get("vault_path", "")
-    obsidian_enabled = click.confirm("  Enable Obsidian vault search?", default=obsidian_enabled)
-    if obsidian_enabled:
-        obsidian_path = click.prompt("    Path to Obsidian vault", default=obsidian_path)
-        obsidian_path = str(Path(obsidian_path).expanduser())
+        secrets_updates["gmail"] = {"address": gmail_address}
+        if gmail_allow_send and gmail_app_password:
+            secrets_updates["gmail"]["app_password"] = gmail_app_password
 
-    # Trello
+    # --- 5b: Trello ---
     trello_cfg = integrations.get("trello", {}) or {}
-    trello_enabled = click.confirm(
-        "  Enable Trello project tools? (boards/lists/cards/labels/comments)",
-        default=trello_cfg.get("enabled", False),
-    )
-    trello_disable_board_delete = bool(trello_cfg.get("disable_board_delete", False))
+    trello_enabled = _ask_confirm("Connect Trello? (boards, lists, cards)", default=trello_cfg.get("enabled", False))
     trello_api_key = existing_secrets.get("trello", {}).get("api_key", "")
     trello_token = existing_secrets.get("trello", {}).get("token", "")
-    if trello_enabled:
-        if not trello_api_key or click.confirm("    Set/change Trello API key?", default=not bool(trello_api_key)):
-            console.print(
-                Panel(
-                    "1. Visit https://trello.com/power-ups/admin\n"
-                    "2. Open your Power-Up / API page and copy your API key",
-                    title="Trello API Key",
-                )
-            )
-            trello_api_key = click.prompt("    Trello API key", hide_input=True)
-        if not trello_token or click.confirm("    Set/change Trello token?", default=not bool(trello_token)):
-            console.print(
-                Panel(
-                    "1. Open https://trello.com/1/authorize with your key\n"
-                    "2. Generate a token with read/write scopes\n"
-                    "3. Copy the token value",
-                    title="Trello Token",
-                )
-            )
-            trello_token = click.prompt("    Trello token", hide_input=True)
-        trello_disable_board_delete = click.confirm(
-            "    Disable permanent board deletion tool? (recommended)",
-            default=trello_disable_board_delete,
-        )
+    trello_disable_board_delete = bool(trello_cfg.get("disable_board_delete", False))
 
-    # Notion
+    if trello_enabled:
+        if not trello_api_key or _ask_confirm("Set/change Trello credentials?", default=not bool(trello_api_key)):
+            _show_guide(
+                "Trello Setup",
+                "1. Go to: https://trello.com/power-ups/admin\n"
+                "2. Click \"New\" to create a Power-Up\n"
+                "3. Fill in a name (e.g., \"Roshni Bot\") and your workspace\n"
+                "4. After creation, click \"Generate a new API key\"\n"
+                "5. Copy the API key, then click the Token link to authorize\n"
+                "6. Copy the token value",
+            )
+            key = questionary.password("  Trello API key:").ask()
+            if key is None:
+                raise click.Abort()
+            trello_api_key = key
+            tok = questionary.password("  Trello token:").ask()
+            if tok is None:
+                raise click.Abort()
+            trello_token = tok
+
+        trello_disable_board_delete = _ask_confirm(
+            "Disable permanent board deletion? (recommended)", default=True
+        )
+        secrets_updates["trello"] = {"api_key": trello_api_key, "token": trello_token}
+
+    # --- 5c: Notion ---
     notion_cfg = integrations.get("notion", {}) or {}
-    notion_enabled = click.confirm(
-        "  Enable Notion knowledge tools? (search/create/update pages)",
-        default=notion_cfg.get("enabled", False),
+    notion_enabled = _ask_confirm(
+        "Connect Notion? (search, create, update pages)", default=notion_cfg.get("enabled", False)
     )
     notion_database_id = notion_cfg.get("database_id", "")
     notion_title_property = notion_cfg.get("title_property", "Name")
     notion_token = existing_secrets.get("notion", {}).get("token", "")
-    if notion_enabled:
-        notion_database_id = click.prompt("    Notion database ID", default=notion_database_id)
-        notion_title_property = click.prompt("    Notion title property name", default=notion_title_property)
-        if not notion_token or click.confirm(
-            "    Set/change Notion integration token?",
-            default=not bool(notion_token),
-        ):
-            console.print(
-                Panel(
-                    "1. Create a Notion internal integration at https://www.notion.so/my-integrations\n"
-                    "2. Copy the integration token\n"
-                    "3. Share your target database with that integration",
-                    title="Notion Token",
-                )
-            )
-            notion_token = click.prompt("    Notion token", hide_input=True)
 
-    # HealthKit (Apple Health export)
+    if notion_enabled:
+        if not notion_token or _ask_confirm("Set/change Notion credentials?", default=not bool(notion_token)):
+            _show_guide(
+                "Notion Setup",
+                "1. Go to: https://www.notion.so/my-integrations\n"
+                "2. Click \"New integration\"\n"
+                "3. Give it a name (e.g., \"Roshni Bot\") and select your workspace\n"
+                "4. Copy the Internal Integration Token\n"
+                "5. Go to the database you want to connect\n"
+                "6. Click ••• → Add connections → select your integration",
+            )
+            tok = questionary.password("  Notion integration token:").ask()
+            if tok is None:
+                raise click.Abort()
+            notion_token = tok
+
+        notion_database_id = _ask_text("Notion database ID:", default=notion_database_id)
+        notion_title_property = _ask_text("Title property name:", default=notion_title_property)
+        secrets_updates["notion"] = {"token": notion_token}
+
+    # --- 5d: Apple Health ---
     healthkit_cfg = integrations.get("healthkit", {}) or {}
-    healthkit_enabled = click.confirm(
-        "  Enable HealthKit import via Apple Health export.xml?",
-        default=healthkit_cfg.get("enabled", False),
-    )
+    healthkit_enabled = _ask_confirm("Import Apple Health data?", default=healthkit_cfg.get("enabled", False))
     healthkit_export_path = str(
         Path(healthkit_cfg.get("export_path", "~/Downloads/apple_health_export/export.xml")).expanduser()
     )
     if healthkit_enabled:
+        console.print(
+            "  [dim]On your iPhone: Health app → profile picture → Export All Health Data → "
+            "share the zip to your Mac → unzip it[/dim]"
+        )
         healthkit_export_path = str(
-            Path(
-                click.prompt(
-                    "    Path to Apple Health export.xml",
-                    default=healthkit_export_path,
-                )
-            ).expanduser()
+            Path(_ask_text("Path to export.xml:", default=healthkit_export_path)).expanduser()
         )
 
-    # Builtins + delighters
-    builtins_cfg = integrations.get("builtins", {}) or {}
-    delighters_cfg = integrations.get("delighters", {}) or {}
-    builtins_enabled = click.confirm(
-        "  Enable builtins (weather, web search/fetch)?",
-        default=builtins_cfg.get("enabled", True),
+    # --- 5e: Fitbit ---
+    fitbit_cfg = integrations.get("fitbit", {}) or {}
+    fitbit_enabled = _ask_confirm(
+        "Connect Fitbit? (steps, sleep, heart rate)", default=fitbit_cfg.get("enabled", False)
     )
-    delighters_enabled = click.confirm(
-        "  Enable delighters (morning brief, plans, reminders)?",
-        default=delighters_cfg.get("enabled", True),
-    )
+    fitbit_client_id = existing_secrets.get("fitbit", {}).get("client_id", "")
+    fitbit_client_secret = existing_secrets.get("fitbit", {}).get("client_secret", "")
 
-    # Google Workspace profile (least-privilege defaults)
-    google_cfg = integrations.get("google_workspace", {}) or {}
-    google_enabled = click.confirm(
-        "  Enable Google Workspace profile? (Gmail drafts, Calendar, Docs, Sheets)",
-        default=google_cfg.get("enabled", False),
-    )
-    google_credentials_path = str(
-        Path(google_cfg.get("credentials_path", "~/.roshni/google/client_secret.json")).expanduser()
-    )
-    google_token_path = str(Path(google_cfg.get("token_path", "~/.roshni/google/token.pickle")).expanduser())
-    google_scopes = google_cfg.get("scopes", {}) or {}
-    google_gmail_drafts = bool(google_scopes.get("gmail_drafts", True))
-    google_calendar_rw = bool(google_scopes.get("calendar_rw", True))
-    google_docs_ro = bool(google_scopes.get("docs_readonly", True))
-    google_sheets_ro = bool(google_scopes.get("sheets_readonly", True))
-    if google_enabled:
-        click.echo("    Least-privilege defaults are preselected.")
-        google_credentials_path = str(
-            Path(
-                click.prompt(
-                    "    OAuth client credentials JSON path",
-                    default=google_credentials_path,
-                )
-            ).expanduser()
-        )
-        google_token_path = str(
-            Path(
-                click.prompt(
-                    "    OAuth token cache path",
-                    default=google_token_path,
-                )
-            ).expanduser()
-        )
-        google_gmail_drafts = click.confirm("    Gmail draft access", default=google_gmail_drafts)
-        google_calendar_rw = click.confirm("    Calendar read/write access", default=google_calendar_rw)
-        google_docs_ro = click.confirm("    Docs read-only access", default=google_docs_ro)
-        google_sheets_ro = click.confirm("    Sheets read-only access", default=google_sheets_ro)
+    if fitbit_enabled:
+        if not fitbit_client_id or _ask_confirm(
+            "Set/change Fitbit credentials?", default=not bool(fitbit_client_id)
+        ):
+            _show_guide(
+                "Fitbit API Setup",
+                "1. Go to: https://dev.fitbit.com/apps/new\n"
+                "2. Sign in with your Fitbit account\n"
+                "3. Register a new app:\n"
+                "     → Application Name: Roshni (or anything)\n"
+                "     → OAuth 2.0 Application Type: Personal\n"
+                "     → Callback URL: http://localhost:8080/\n"
+                "4. After creation, copy the Client ID and Client Secret",
+            )
+            cid = _ask_text("  Fitbit Client ID:", default=fitbit_client_id)
+            fitbit_client_id = cid
+            cs = questionary.password("  Fitbit Client Secret:").ask()
+            if cs is None:
+                raise click.Abort()
+            fitbit_client_secret = cs
 
-    # --- Permission tiers ---
-    existing_perms = existing_config.get("permissions", {}) or {}
-    tier_choices = ["observe", "interact", "full"]
-
-    click.echo("\nPermission levels for enabled integrations:")
-    click.echo("  (observe=read-only, interact=read+writes, full=everything)")
-
-    permissions_cfg: dict[str, str] = {}
-    domain_defaults = {
-        "gmail": "interact",
-        "obsidian": "interact",
-        "trello": "interact",
-        "notion": "interact",
-        "health": "observe",
-        "tasks": "interact",
-        "vault": "interact",
-    }
-    enabled_domains: list[tuple[str, bool]] = [
-        ("gmail", gmail_enabled),
-        ("trello", trello_enabled),
-        ("notion", notion_enabled),
-        ("obsidian", obsidian_enabled),
-        ("health", healthkit_enabled),
-    ]
-    # Tasks and vault are always-on when vault is configured
-    enabled_domains.append(("tasks", True))
-    enabled_domains.append(("vault", True))
-
-    for domain, enabled in enabled_domains:
-        if not enabled:
-            permissions_cfg[domain] = "none"
-            continue
-        default_tier = existing_perms.get(domain, domain_defaults.get(domain, "interact"))
-        tier = _prompt_choice(
-            f"  {domain.title()} permission level?",
-            tier_choices,
-            default=default_tier,
-        )
-        permissions_cfg[domain] = tier
-
-    # --- Generate files ---
-    click.echo("\nSaving configuration...")
-
-    # Ensure directories
-    ROSHNI_DIR.mkdir(exist_ok=True)
-    (ROSHNI_DIR / "logs").mkdir(exist_ok=True)
-    (ROSHNI_DIR / "drafts" / "email").mkdir(parents=True, exist_ok=True)
-    if google_enabled:
-        Path(google_token_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
-
-    # Scaffold vault
-    from roshni.agent.vault import VaultManager
-
-    vault = VaultManager(vault_path, agent_dir)
-    vault.scaffold()
-    click.echo(f"  Vault:   {vault.base_dir}/")
-
-    # Persona dir points into vault now
-    persona_dir = vault.persona_dir
-
-    # Config — new multi-provider format
-    from roshni.core.llm.config import get_default_model
-
-    llm_config: dict = {
-        "default": provider,
-    }
-    if fallback_provider:
-        llm_config["fallback"] = fallback_provider
-
-    # Build providers section with default models
-    providers_cfg: dict = {}
-    for prov in configured_providers:
-        providers_cfg[prov] = {"model": get_default_model(prov)}
-    if provider == "local":
-        providers_cfg["local"] = {"model": get_default_model("local")}
-    llm_config["providers"] = providers_cfg
-
-    config_data = {
-        "bot": {"name": bot_name, "tone": tone},
-        "user": {"name": user_name},
-        "llm": llm_config,
-        "platform": platform,
-        "vault": {
-            "path": vault_path,
-            "agent_dir": agent_dir,
-        },
-        "permissions": permissions_cfg,
-        "paths": {
-            "data_dir": str(ROSHNI_DIR),
-            "log_dir": str(ROSHNI_DIR / "logs"),
-            "persona_dir": str(persona_dir),
-            "email_drafts_dir": str(ROSHNI_DIR / "drafts" / "email"),
-            "reminders_path": str(ROSHNI_DIR / "reminders.json"),
-        },
-        "security": {"require_write_approval": require_write_approval},
-    }
-
-    if platform == "telegram":
-        config_data["telegram"] = {
-            "allowed_user_ids": [str(telegram_user_id)] if telegram_user_id else [],
+        secrets_updates["fitbit"] = {
+            "client_id": fitbit_client_id,
+            "client_secret": fitbit_client_secret,
         }
 
-    config_data["integrations"] = {
+    # Build integrations config
+    integrations_cfg = {
         "gmail": {
             "enabled": gmail_enabled,
             "mode": gmail_mode,
             "allow_send": gmail_allow_send,
         },
         "obsidian": {
-            "enabled": obsidian_enabled,
-            "vault_path": obsidian_path,
+            "enabled": True,  # auto-enabled when vault is configured
+            "vault_path": "",  # filled in by caller with vault_path
         },
-        "builtins": {"enabled": builtins_enabled},
-        "delighters": {"enabled": delighters_enabled},
+        "builtins": {"enabled": True},
+        "delighters": {"enabled": True},
         "google_workspace": {
-            "enabled": google_enabled,
+            "enabled": google_ws_enabled,
             "credentials_path": google_credentials_path,
             "token_path": google_token_path,
             "scopes": {
-                "gmail_drafts": google_gmail_drafts,
-                "calendar_rw": google_calendar_rw,
-                "docs_readonly": google_docs_ro,
-                "sheets_readonly": google_sheets_ro,
+                "gmail_drafts": gmail_enabled,
+                "calendar_rw": "Calendar" in selected_services,
+                "docs_readonly": "Docs" in selected_services,
+                "sheets_readonly": "Sheets" in selected_services,
             },
         },
         "trello": {
@@ -628,40 +604,196 @@ def init() -> None:
             "enabled": healthkit_enabled,
             "export_path": healthkit_export_path,
         },
+        "fitbit": {
+            "enabled": fitbit_enabled,
+        },
     }
+
+    return integrations_cfg, secrets_updates
+
+
+def _step_safety() -> str:
+    """Step 6: Safety level. Returns the tier string."""
+    console.print("\n[bold]Step 5 · Safety Level[/bold]")
+
+    choices = [
+        Choice(
+            title=f"{info['label']}\n    {info['description']}",
+            value=key,
+        )
+        for key, info in SAFETY_LEVELS.items()
+    ]
+
+    level = _ask_select("How much should your bot be able to do on its own?", choices, default="balanced")
+    return SAFETY_LEVELS[level]["tier"]
+
+
+def _step_platform(existing_config: dict, existing_secrets: dict) -> tuple[str, str, str]:
+    """Step 7: Platform. Returns (platform, telegram_token, telegram_user_id)."""
+    console.print("\n[bold]Step 6 · Platform[/bold]")
+
+    default_platform = existing_config.get("platform", "telegram")
+    platform = _ask_select(
+        "Where will your bot live?",
+        [
+            Choice(title="Telegram", value="telegram"),
+            Choice(title="Terminal only", value="terminal-only"),
+        ],
+        default=default_platform,
+    )
+
+    telegram_token = existing_secrets.get("telegram", {}).get("bot_token", "")
+    tg_cfg = existing_config.get("telegram", {})
+    tg_uids = tg_cfg.get("allowed_user_ids", [])
+    telegram_user_id = tg_uids[0] if tg_uids else ""
+
+    if platform == "telegram":
+        if not telegram_token or _ask_confirm("Set up Telegram bot token?", default=not bool(telegram_token)):
+            _show_guide(
+                "Create a Telegram Bot",
+                "1. Open Telegram and search for @BotFather\n"
+                "2. Send /newbot and follow the prompts\n"
+                "3. Copy the token BotFather gives you",
+            )
+            tok = questionary.password("Bot token:").ask()
+            if tok is None:
+                raise click.Abort()
+            telegram_token = tok
+
+        if not telegram_user_id or _ask_confirm(
+            "Set up your Telegram user ID?", default=not bool(telegram_user_id)
+        ):
+            _show_guide(
+                "Find Your Telegram User ID",
+                "1. Open Telegram and search for @userinfobot\n"
+                "2. Send it any message\n"
+                "3. It will reply with your user ID (a number)",
+            )
+            while True:
+                telegram_user_id = _ask_text("Your Telegram user ID:")
+                if telegram_user_id.strip().isdigit():
+                    telegram_user_id = telegram_user_id.strip()
+                    break
+                click.echo("Please enter numbers only (example: 123456789).")
+
+        if not telegram_user_id:
+            raise click.ClickException(
+                "Telegram requires an allowed user ID for security. Re-run and provide your Telegram user ID."
+            )
+
+    return platform, telegram_token, telegram_user_id
+
+
+# ---------------------------------------------------------------------------
+# Main command
+# ---------------------------------------------------------------------------
+
+
+@click.command()
+def init() -> None:
+    """Set up your personal AI assistant."""
+    existing_config = _load_existing_config()
+    existing_secrets = _load_existing_secrets()
+    is_reconfig = bool(existing_config)
+
+    # Step 1: Welcome
+    _step_welcome(is_reconfig)
+
+    # Step 2: Identity
+    bot_name, user_name, tone = _step_identity(existing_config)
+
+    # Step 3: AI Provider
+    provider, fallback_provider, configured_providers = _step_ai_provider(existing_config, existing_secrets)
+
+    # Step 4: Bot's Brain (vault)
+    vault_path, agent_dir = _step_vault(existing_config, bot_name)
+
+    # Step 5: Integrations
+    integrations_cfg, integration_secrets = _step_integrations(existing_config, existing_secrets)
+    # Set obsidian vault_path to same as brain vault_path
+    integrations_cfg["obsidian"]["vault_path"] = vault_path
+
+    # Step 6: Safety Level
+    safety_tier = _step_safety()
+    permissions_cfg = {domain: safety_tier for domain in PERMISSION_DOMAINS}
+
+    # Step 7: Platform
+    platform, telegram_token, telegram_user_id = _step_platform(existing_config, existing_secrets)
+
+    # --- Step 8: Save & Summary ---
+    console.print("\n[bold]Saving configuration...[/bold]")
+
+    # Ensure directories
+    ROSHNI_DIR.mkdir(exist_ok=True)
+    (ROSHNI_DIR / "logs").mkdir(exist_ok=True)
+    (ROSHNI_DIR / "drafts" / "email").mkdir(parents=True, exist_ok=True)
+    if integrations_cfg["google_workspace"]["enabled"]:
+        Path(integrations_cfg["google_workspace"]["token_path"]).parent.mkdir(parents=True, exist_ok=True)
+
+    # Scaffold vault
+    from roshni.agent.vault import VaultManager
+
+    vault = VaultManager(vault_path, agent_dir)
+    vault.scaffold()
+    click.echo(f"  Vault:   {vault.base_dir}/")
+
+    persona_dir = vault.persona_dir
+
+    # Build LLM config
+    from roshni.core.llm.config import get_default_model
+
+    llm_config: dict = {"default": provider}
+    if fallback_provider:
+        llm_config["fallback"] = fallback_provider
+    providers_cfg: dict = {}
+    for prov in configured_providers:
+        providers_cfg[prov] = {"model": get_default_model(prov)}
+    if provider == "local":
+        providers_cfg["local"] = {"model": get_default_model("local")}
+    llm_config["providers"] = providers_cfg
+
+    config_data = {
+        "bot": {"name": bot_name, "tone": tone},
+        "user": {"name": user_name},
+        "llm": llm_config,
+        "platform": platform,
+        "vault": {"path": vault_path, "agent_dir": agent_dir},
+        "permissions": permissions_cfg,
+        "paths": {
+            "data_dir": str(ROSHNI_DIR),
+            "log_dir": str(ROSHNI_DIR / "logs"),
+            "persona_dir": str(persona_dir),
+            "email_drafts_dir": str(ROSHNI_DIR / "drafts" / "email"),
+            "reminders_path": str(ROSHNI_DIR / "reminders.json"),
+        },
+        "security": {"require_write_approval": safety_tier != "full"},
+    }
+
+    if platform == "telegram":
+        config_data["telegram"] = {
+            "allowed_user_ids": [str(telegram_user_id)] if telegram_user_id else [],
+        }
+
+    config_data["integrations"] = integrations_cfg
 
     with open(CONFIG_PATH, "w") as f:
         yaml.dump(config_data, f, default_flow_style=False, sort_keys=False)
     click.echo(f"  Config:  {CONFIG_PATH}")
 
-    # Secrets — new multi-provider format
+    # Secrets
     secrets_data: dict = {
         "llm": {"api_keys": configured_providers} if configured_providers else {},
     }
     if telegram_token:
         secrets_data["telegram"] = {"bot_token": telegram_token}
-    if gmail_enabled:
-        secrets_data["gmail"] = {
-            "address": gmail_address,
-        }
-        if gmail_allow_send and gmail_app_password:
-            secrets_data["gmail"]["app_password"] = gmail_app_password
-    if trello_enabled:
-        secrets_data["trello"] = {
-            "api_key": trello_api_key,
-            "token": trello_token,
-        }
-    if notion_enabled:
-        secrets_data["notion"] = {
-            "token": notion_token,
-        }
+    secrets_data.update(integration_secrets)
 
     with open(SECRETS_PATH, "w") as f:
         yaml.dump(secrets_data, f, default_flow_style=False, sort_keys=False)
-    os.chmod(SECRETS_PATH, stat.S_IRUSR | stat.S_IWUSR)  # 600
+    os.chmod(SECRETS_PATH, stat.S_IRUSR | stat.S_IWUSR)
     click.echo(f"  Secrets: {SECRETS_PATH} (mode 600)")
 
-    # Persona files — written into vault
+    # Persona files
     try:
         from roshni.agent.templates import (
             get_agents_template,
@@ -677,7 +809,9 @@ def init() -> None:
                 content = content.replace(k, v)
             return content
 
-        (persona_dir / "IDENTITY.md").write_text(_apply(get_identity_template(tone)))
+        # For custom tones, fall back to "friendly" template
+        template_tone = tone if tone in TONE_DESCRIPTIONS else "friendly"
+        (persona_dir / "IDENTITY.md").write_text(_apply(get_identity_template(template_tone)))
         (persona_dir / "SOUL.md").write_text(_apply(get_soul_template()))
         (persona_dir / "USER.md").write_text(_apply(get_user_template()))
         (persona_dir / "AGENTS.md").write_text(_apply(get_agents_template()))
@@ -686,42 +820,36 @@ def init() -> None:
         click.echo(f"  Warning: Could not write persona files: {e}")
 
     # Summary
-    click.echo("")
-    providers_summary = provider_names[provider]
+    prov_summary = PROVIDER_DISPLAY[provider]
     if fallback_provider:
-        providers_summary += f" (fallback: {provider_names[fallback_provider]})"
-    extra = [p for p in configured_providers if p != provider and p != fallback_provider]
-    if extra:
-        providers_summary += f" + {', '.join(provider_names[p] for p in extra)}"
+        prov_summary += f" → {PROVIDER_DISPLAY[fallback_provider]}"
 
-    if gmail_enabled and not gmail_allow_send:
-        gmail_status = "draft-only"
-    elif gmail_enabled:
-        gmail_status = "send+draft"
-    else:
-        gmail_status = "disabled"
+    enabled_integrations = [
+        name
+        for name in ["gmail", "trello", "notion", "healthkit", "fitbit"]
+        if integrations_cfg.get(name, {}).get("enabled")
+    ]
+    if integrations_cfg.get("google_workspace", {}).get("enabled"):
+        enabled_integrations.append("google workspace")
 
-    # Build permission summary
-    perm_summary = ", ".join(f"{d}={t}" for d, t in permissions_cfg.items() if t != "none")
+    safety_label = next(
+        (info["label"] for info in SAFETY_LEVELS.values() if info["tier"] == safety_tier),
+        safety_tier,
+    )
 
+    console.print()
     console.print(
         Panel(
-            f"Bot name: {bot_name}\n"
-            f"Tone: {tone}\n"
-            f"Provider: {providers_summary}\n"
-            f"Platform: {platform}\n"
-            f"Vault: {vault.base_dir}\n"
-            f"Permissions: {perm_summary}\n"
-            f"Write approvals: {'enabled' if require_write_approval else 'disabled'}\n"
-            f"Gmail: {gmail_status}\n"
-            f"Obsidian: {'enabled' if obsidian_enabled else 'disabled'}\n"
-            f"Trello: {'enabled' if trello_enabled else 'disabled'}\n"
-            f"Notion: {'enabled' if notion_enabled else 'disabled'}\n"
-            f"HealthKit: {'enabled' if healthkit_enabled else 'disabled'}\n"
-            f"Builtins: {'enabled' if builtins_enabled else 'disabled'}\n"
-            f"Delighters: {'enabled' if delighters_enabled else 'disabled'}\n"
-            f"Google profile: {'enabled' if google_enabled else 'disabled'}",
+            f"[bold]{bot_name}[/bold] is ready!\n"
+            f"\n"
+            f"  AI:            {prov_summary}\n"
+            f"  Personality:   {tone}\n"
+            f"  Brain:         {vault.base_dir}\n"
+            f"  Safety:        {safety_label}\n"
+            f"  Integrations:  {', '.join(enabled_integrations) if enabled_integrations else 'none yet'}\n"
+            f"  Platform:      {platform}",
             title="Setup Complete",
+            border_style="green",
         )
     )
 

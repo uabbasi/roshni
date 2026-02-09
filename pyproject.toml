@@ -23,6 +23,7 @@ dependencies = [
     "aiofiles>=23.2",
     "click>=8.0",
     "rich>=13.0",
+    "questionary>=2.0",
 ]
 
 [project.optional-dependencies]

@@ -43,13 +43,14 @@ def set_api_key_env(config, secrets) -> None:
 
     from roshni.core.llm.config import PROVIDER_ENV_MAP
 
-    # New format: llm.api_keys.<provider> — set all configured providers
-    api_keys: dict = secrets.get("llm.api_keys", {}) or {}
-    if api_keys:
-        for provider, key in api_keys.items():
-            env_var = PROVIDER_ENV_MAP.get(provider)
-            if env_var and key and env_var not in os.environ:
-                os.environ[env_var] = key
+    # New format: look up each known provider key individually
+    found_any = False
+    for provider, env_var in PROVIDER_ENV_MAP.items():
+        key = secrets.get(f"llm.api_keys.{provider}")
+        if key and env_var not in os.environ:
+            os.environ[env_var] = key
+            found_any = True
+    if found_any:
         return
 
     # Legacy format: single llm.api_key → infer provider from config
