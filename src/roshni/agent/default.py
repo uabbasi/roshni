@@ -149,25 +149,29 @@ class DefaultAgent(BaseAgent):
         clear_history = call_type in ("heartbeat", "scheduled")
 
         try:
-            pending = self._handle_pending_approval(message, tool_call_log)
-            if pending is not None:
-                return pending
+            if self._pending_approval:
+                result = self._handle_pending_approval(message, tool_call_log)
+                if result is not None:
+                    return result
+                # Approved/denied — tools already executed, resume LLM loop
+                selected_model = self._select_model(message, mode)
+                tool_schemas = [t.to_litellm_schema() for t in self.tools] if self.tools else None
+            else:
+                # Track where this turn begins (for clear_history slicing)
+                self._turn_start = len(self.message_history)
 
-            # Track where this turn begins (for clear_history slicing)
-            self._turn_start = len(self.message_history)
+                # Add user message to history
+                self.message_history.append({"role": "user", "content": message})
 
-            # Add user message to history
-            self.message_history.append({"role": "user", "content": message})
+                # Compression check
+                if self._enable_compression:
+                    self._maybe_compress_history()
 
-            # Compression check
-            if self._enable_compression:
-                self._maybe_compress_history()
+                # Model selection
+                selected_model = self._select_model(message, mode)
 
-            # Model selection
-            selected_model = self._select_model(message, mode)
-
-            # Build tool schemas
-            tool_schemas = [t.to_litellm_schema() for t in self.tools] if self.tools else None
+                # Build tool schemas
+                tool_schemas = [t.to_litellm_schema() for t in self.tools] if self.tools else None
 
             # --- Main tool loop ---
             self._run_tool_loop(
@@ -182,7 +186,10 @@ class DefaultAgent(BaseAgent):
             )
             if self._pending_approval:
                 # Approval bail — _run_tool_loop set _pending_approval
-                prompt = self.message_history[-1].get("content", "")
+                prompt = self._build_approval_prompt(
+                    self._pending_approval["tool_name"],
+                    self._pending_approval["parsed_args"],
+                )
                 self._trim_history()
                 return ChatResult(
                     text=prompt,
@@ -209,7 +216,10 @@ class DefaultAgent(BaseAgent):
                     channel=channel,
                 )
                 if self._pending_approval:
-                    prompt = self.message_history[-1].get("content", "")
+                    prompt = self._build_approval_prompt(
+                        self._pending_approval["tool_name"],
+                        self._pending_approval["parsed_args"],
+                    )
                     self._trim_history()
                     return ChatResult(
                         text=prompt,
@@ -348,9 +358,12 @@ class DefaultAgent(BaseAgent):
                             "tool_name": fn_name,
                             "raw_args": fn_args,
                             "parsed_args": parsed_args if isinstance(parsed_args, dict) else {},
+                            "tool_call_id": tool_call.id,
+                            "remaining_tool_calls": [
+                                {"id": tc.id, "name": tc.function.name, "arguments": tc.function.arguments}
+                                for tc in assistant_message.tool_calls[i + 1 :]
+                            ],
                         }
-                        prompt = self._build_approval_prompt(fn_name, self._pending_approval["parsed_args"])
-                        self.message_history.append({"role": "assistant", "content": prompt})
                         return  # Caller checks _pending_approval
                     result = tool.execute(fn_args)
                 else:
@@ -702,6 +715,12 @@ class DefaultAgent(BaseAgent):
         )
 
     def _handle_pending_approval(self, message: str, tool_call_log: list[dict[str, Any]]) -> ChatResult | None:
+        """Handle a pending approval prompt.
+
+        Returns ``None`` when the approval is resolved (approve/deny) —
+        signalling ``chat()`` to resume the tool loop.  Returns a
+        ``ChatResult`` only when re-prompting (unrecognised input).
+        """
         if not self._pending_approval:
             return None
 
@@ -710,30 +729,54 @@ class DefaultAgent(BaseAgent):
         tool_name = self._pending_approval["tool_name"]
         raw_args = self._pending_approval["raw_args"]
         parsed_args = self._pending_approval["parsed_args"]
+        tool_call_id = self._pending_approval["tool_call_id"]
+        remaining = self._pending_approval.get("remaining_tool_calls", [])
 
         self.message_history.append({"role": "user", "content": message})
 
         if decision == "approve":
+            # Execute the approved tool and add proper tool-result message
             result = tool.execute(raw_args)
             tool_call_log.append({"name": tool_name, "args": raw_args, "result": result})
+            self.message_history.append(
+                {"role": "tool", "tool_call_id": tool_call_id, "content": self._normalize_content(result)}
+            )
+
+            # Execute remaining tool calls from the same batch
+            tool_map = {t.name: t for t in self.tools}
+            for tc in remaining:
+                tc_tool = tool_map.get(tc["name"])
+                if tc_tool:
+                    tc_result = tc_tool.execute(tc["arguments"])
+                else:
+                    tc_result = f"Unknown tool: {tc['name']}"
+                tool_call_log.append({"name": tc["name"], "args": tc["arguments"], "result": tc_result})
+                self.message_history.append(
+                    {"role": "tool", "tool_call_id": tc["id"], "content": self._normalize_content(tc_result)}
+                )
+
             self._approval_store.grant(tool_name)
             self._pending_approval = None
-            text = f"Approved and executed `{tool_name}`.\n\n{result}"
-            self.message_history.append({"role": "assistant", "content": text})
-            self._trim_history()
-            return ChatResult(text=text, tool_calls=tool_call_log, model=self.model)
+            return None  # Signal chat() to resume tool loop
 
         if decision == "deny":
-            self._pending_approval = None
-            text = f"Canceled `{tool_name}`."
-            self.message_history.append({"role": "assistant", "content": text})
-            self._trim_history()
-            return ChatResult(text=text, tool_calls=tool_call_log, model=self.model)
+            # Add error tool results for ALL pending tool calls (OpenAI requires
+            # a result for every tool_call in the assistant message)
+            error_msg = f"User denied execution of {tool_name}"
+            self.message_history.append({"role": "tool", "tool_call_id": tool_call_id, "content": error_msg})
+            for tc in remaining:
+                self.message_history.append(
+                    {"role": "tool", "tool_call_id": tc["id"], "content": f"Skipped: prior tool {tool_name} was denied"}
+                )
 
-        text = self._build_approval_prompt(tool_name, parsed_args)
-        self.message_history.append({"role": "assistant", "content": text})
+            self._pending_approval = None
+            return None  # Signal chat() to resume — LLM will see the errors
+
+        # Unrecognised input — re-prompt
+        prompt = self._build_approval_prompt(tool_name, parsed_args)
+        self.message_history.append({"role": "assistant", "content": prompt})
         self._trim_history()
-        return ChatResult(text=text, tool_calls=tool_call_log, model=self.model)
+        return ChatResult(text=prompt, tool_calls=tool_call_log, model=self.model)
 
     # ------------------------------------------------------------------
     # Config resolution

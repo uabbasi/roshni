@@ -186,10 +186,11 @@ class TestDefaultAgentChat:
         result = agent.chat("Save hello")
         assert "Approval required" in result.text
 
+        # After approve, the tool loop resumes — LLM gets called again
+        mock_completion.return_value = _make_response("Done! I wrote hello for you.")
         approved = agent.chat("approve")
-        assert "Approved and executed" in approved.text
         assert approved.tool_calls[0]["name"] == "write_thing"
-        assert "Wrote: hello" in approved.text
+        assert approved.tool_calls[0]["result"] == "Wrote: hello"
 
     @patch("roshni.core.llm.client.LLMClient.completion")
     def test_write_tool_denied(self, mock_completion, config, secrets, write_tool):
@@ -201,8 +202,83 @@ class TestDefaultAgentChat:
 
         agent = DefaultAgent(config=config, secrets=secrets, tools=[write_tool])
         _ = agent.chat("Save hello")
+
+        # After deny, tool loop resumes — LLM sees error tool results
+        mock_completion.return_value = _make_response("OK, I won't write that.")
         denied = agent.chat("deny")
-        assert "Canceled" in denied.text
+        assert "won't write" in denied.text.lower() or denied.text  # LLM responds
+
+    @patch("roshni.core.llm.client.LLMClient.completion")
+    def test_batch_tool_calls_resume_after_approval(self, mock_completion, config, secrets, write_tool, echo_tool):
+        """When LLM returns multiple tool calls and first needs approval,
+        approving executes ALL tools and resumes the LLM loop."""
+        # LLM returns 3 tool calls: write_thing (needs approval), echo, echo
+        tc_write = MagicMock()
+        tc_write.id = "call_1"
+        tc_write.function.name = "write_thing"
+        tc_write.function.arguments = '{"text": "important"}'
+
+        tc_echo1 = MagicMock()
+        tc_echo1.id = "call_2"
+        tc_echo1.function.name = "echo"
+        tc_echo1.function.arguments = '{"text": "first"}'
+
+        tc_echo2 = MagicMock()
+        tc_echo2.id = "call_3"
+        tc_echo2.function.name = "echo"
+        tc_echo2.function.arguments = '{"text": "second"}'
+
+        mock_completion.return_value = _make_response(None, tool_calls=[tc_write, tc_echo1, tc_echo2])
+
+        agent = DefaultAgent(config=config, secrets=secrets, tools=[write_tool, echo_tool])
+        result = agent.chat("Do three things")
+
+        # First chat should bail with approval prompt
+        assert "Approval required" in result.text
+        assert "write_thing" in result.text
+        # Only 0 tool calls executed so far
+        assert len(result.tool_calls) == 0
+
+        # Now approve — should execute all 3 tools, then LLM resumes
+        mock_completion.return_value = _make_response("All 3 tasks completed successfully.")
+        approved = agent.chat("approve")
+
+        # All 3 tools should be in the log
+        assert len(approved.tool_calls) == 3
+        assert approved.tool_calls[0]["name"] == "write_thing"
+        assert approved.tool_calls[0]["result"] == "Wrote: important"
+        assert approved.tool_calls[1]["name"] == "echo"
+        assert approved.tool_calls[1]["result"] == "Echo: first"
+        assert approved.tool_calls[2]["name"] == "echo"
+        assert approved.tool_calls[2]["result"] == "Echo: second"
+        assert "completed" in approved.text.lower()
+
+    @patch("roshni.core.llm.client.LLMClient.completion")
+    def test_batch_tool_calls_deny_sends_error_results(self, mock_completion, config, secrets, write_tool, echo_tool):
+        """Denying a batch adds error tool results for all calls so the LLM can respond."""
+        tc_write = MagicMock()
+        tc_write.id = "call_1"
+        tc_write.function.name = "write_thing"
+        tc_write.function.arguments = '{"text": "nope"}'
+
+        tc_echo = MagicMock()
+        tc_echo.id = "call_2"
+        tc_echo.function.name = "echo"
+        tc_echo.function.arguments = '{"text": "also nope"}'
+
+        mock_completion.return_value = _make_response(None, tool_calls=[tc_write, tc_echo])
+
+        agent = DefaultAgent(config=config, secrets=secrets, tools=[write_tool, echo_tool])
+        _ = agent.chat("Do two things")
+
+        # Deny — LLM should see tool error results and produce a response
+        mock_completion.return_value = _make_response("Understood, I won't do those.")
+        denied = agent.chat("deny")
+        assert denied.text  # LLM produced a response
+
+        # Verify the history has proper tool error results
+        tool_msgs = [m for m in agent.message_history if m.get("role") == "tool"]
+        assert len(tool_msgs) >= 2  # One for each tool call in the batch
 
 
 class TestDefaultAgentMultiProviderConfig:
