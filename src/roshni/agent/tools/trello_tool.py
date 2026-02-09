@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 from roshni.agent.permissions import PermissionTier, filter_tools_by_tier
@@ -30,6 +31,87 @@ def _parse_optional_bool(value: Any) -> bool | None:
     return None
 
 
+def _enrich_card_urgency(card: dict[str, Any], now: datetime | None = None) -> dict[str, Any]:
+    """Parse ISO due date and add urgency fields: days_until_due, is_overdue, overdue_days."""
+    now = now or datetime.now(UTC)
+    due_str = card.get("due")
+    if not due_str:
+        return card
+    try:
+        due_dt = datetime.fromisoformat(due_str.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return card
+    delta = (due_dt - now).total_seconds() / 86400
+    card["days_until_due"] = delta
+    card["is_overdue"] = delta < 0
+    card["overdue_days"] = max(0, int(-delta)) if delta < 0 else 0
+    return card
+
+
+def _format_due_display(card: dict[str, Any]) -> str:
+    """Return human-readable urgency string for a card's due date."""
+    if "days_until_due" not in card:
+        return ""
+    days = card["days_until_due"]
+    if card.get("is_overdue"):
+        return f"OVERDUE ({card['overdue_days']}d ago)"
+    if days < 1:
+        return "TODAY"
+    if days < 2:
+        return "tomorrow"
+    return f"in {int(days)}d"
+
+
+def _find_list_by_name(client: TrelloClient, board_id: str, name: str) -> dict[str, Any] | None:
+    """Find a list by name: exact match first, then case-insensitive partial."""
+    lists = client.list_lists(board_id)
+    # Exact match (case-insensitive)
+    for lst in lists:
+        if lst.get("name", "").lower() == name.lower():
+            return lst
+    # Partial match (case-insensitive)
+    for lst in lists:
+        if name.lower() in lst.get("name", "").lower():
+            return lst
+    return None
+
+
+def _get_trello_today(client: TrelloClient, board_id: str) -> str:
+    """Build a daily briefing from 'Today' and 'This Week' lists."""
+    now = datetime.now(UTC)
+    sections: list[str] = []
+
+    for list_name in ("Today", "This Week"):
+        lst = _find_list_by_name(client, board_id, list_name)
+        if not lst:
+            continue
+        cards = client.list_cards(lst["id"], limit=50)
+        if not cards:
+            continue
+        for c in cards:
+            _enrich_card_urgency(c, now)
+
+        # Sort: overdue first (by overdue_days desc), then today, then rest
+        def _sort_key(c: dict[str, Any]) -> tuple[int, float]:
+            if c.get("is_overdue"):
+                return (0, -c.get("overdue_days", 0))
+            if "days_until_due" in c and c["days_until_due"] < 1:
+                return (1, c["days_until_due"])
+            return (2, c.get("days_until_due", 999))
+
+        cards.sort(key=_sort_key)
+        lines = [f"## {list_name} ({len(cards)} cards)"]
+        for c in cards:
+            urgency = _format_due_display(c)
+            suffix = f" [{urgency}]" if urgency else ""
+            lines.append(f"- {c.get('name', '(untitled)')}{suffix}")
+        sections.append("\n".join(lines))
+
+    if not sections:
+        return "No 'Today' or 'This Week' lists found on this board."
+    return "\n\n".join(sections)
+
+
 def _fmt_boards(items: list[dict[str, Any]]) -> str:
     if not items:
         return "No boards found."
@@ -51,9 +133,12 @@ def _fmt_lists(items: list[dict[str, Any]]) -> str:
 def _fmt_cards(items: list[dict[str, Any]]) -> str:
     if not items:
         return "No cards found."
+    now = datetime.now(UTC)
     lines = ["Cards:"]
     for c in items:
-        due = c.get("due") or "none"
+        _enrich_card_urgency(c, now)
+        urgency = _format_due_display(c)
+        due = urgency if urgency else (c.get("due") or "none")
         labels = ", ".join(
             lbl.get("name") or lbl.get("color", "") for lbl in c.get("labels", []) if isinstance(lbl, dict)
         )
@@ -97,6 +182,19 @@ def _fmt_card(card: dict[str, Any]) -> str:
     if labels:
         label_text = ", ".join(lbl.get("name") or lbl.get("color", "") for lbl in labels if isinstance(lbl, dict))
         lines.append(f"- labels: {label_text or 'none'}")
+
+    checklists = card.get("checklists", []) or []
+    for cl in checklists:
+        if not isinstance(cl, dict):
+            continue
+        items = cl.get("checkItems", []) or []
+        done = sum(1 for it in items if isinstance(it, dict) and it.get("state") == "complete")
+        lines.append(f"- checklist '{cl.get('name', '(unnamed)')}': {done}/{len(items)} complete")
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            mark = "x" if it.get("state") == "complete" else " "
+            lines.append(f"  [{mark}] {it.get('name', '')}")
 
     actions = card.get("actions", []) or []
     comments: list[str] = []
@@ -546,6 +644,54 @@ def create_trello_tools(
                 "Remove label", client.remove_label_from_card(card_id, label_id)
             ),
             permission="write",
+        ),
+        ToolDefinition(
+            name="trello_today",
+            description="Daily briefing: cards from 'Today' and 'This Week' lists, sorted by urgency.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "board_id": {
+                        "type": "string",
+                        "description": "Board ID (defaults to configured default_board_id)",
+                    },
+                },
+                "required": [],
+            },
+            function=lambda board_id="": _get_trello_today(client, board_id or trello_cfg.get("default_board_id", "")),
+            permission="read",
+        ),
+        ToolDefinition(
+            name="trello_find_list",
+            description="Find a list by name on a board (exact match first, then partial).",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "board_id": {"type": "string", "description": "Board ID"},
+                    "name": {"type": "string", "description": "List name to search for"},
+                },
+                "required": ["board_id", "name"],
+            },
+            function=lambda board_id, name: (
+                _fmt_lists([found])
+                if (found := _find_list_by_name(client, board_id, name))
+                else "No matching list found."
+            ),
+            permission="read",
+        ),
+        ToolDefinition(
+            name="trello_find_card",
+            description="Find a card by name, optionally scoped to a board.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Card name to search for"},
+                    "board_id": {"type": "string", "description": "Optional board ID to scope search"},
+                },
+                "required": ["name"],
+            },
+            function=lambda name, board_id="": _fmt_cards(client.search_cards(query=name, board_id=board_id, limit=10)),
+            permission="read",
         ),
     ]
 

@@ -1,9 +1,14 @@
 {
   "hooks": {
-    "PreCommit": [
+    "PreToolUse": [
       {
-        "command": "uv run ruff check src/ tests/ --fix && uv run ruff format src/ tests/",
-        "description": "Run ruff lint + format before commit"
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command=$(echo \"$TOOL_INPUT\" | jq -r '.command // empty') && case \"$command\" in *'git commit'*) cd /Users/uabbasi/dev/roshni && uv run ruff check src/ tests/ --fix && uv run ruff format src/ tests/ ;; esac"
+          }
+        ]
       }
     ]
   }

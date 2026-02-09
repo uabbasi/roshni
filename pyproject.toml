@@ -47,12 +47,14 @@ google = [
     "google-cloud-storage>=2.16",
 ]
 storage-gcs = ["google-cloud-storage>=2.16"]
+web = ["duckduckgo-search>=7.0"]
 all = [
     "roshni[fitbit]",
     "roshni[journal-faiss]",
     "roshni[financial-full]",
     "roshni[bot]",
     "roshni[google]",
+    "roshni[web]",
 ]
 dev = [
     "pytest>=8.3",
@@ -60,7 +62,7 @@ dev = [
     "pytest-cov>=6.2",
     "ruff>=0.12",
     "mypy>=1.11",
-    "roshni[google,health,journal,financial]",
+    "roshni[google,health,journal,financial,web]",
 ]
 
 [project.scripts]

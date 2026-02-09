@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import json
 import re
 import urllib.parse
@@ -68,52 +69,54 @@ def _weather(location: str) -> str:
     )
 
 
-def _web_search(query: str, limit: int = 5) -> str:
+def _web_search(query: str, limit: int = 5, auto_fetch: bool = True) -> str:
     q = query.strip()
     if not q:
         return "Please provide a search query."
 
-    url = "https://api.duckduckgo.com/?" + urllib.parse.urlencode(
-        {"q": q, "format": "json", "no_redirect": "1", "no_html": "1", "skip_disambig": "1"}
-    )
+    # Auto-append current year if query doesn't already contain one
+    if not re.search(r"\b20\d{2}\b", q):
+        q = f"{q} {datetime.datetime.now(datetime.UTC).year}"
+
+    # Try real DDG search via duckduckgo-search package
     try:
-        data = json.loads(_http_get(url).decode("utf-8", errors="ignore"))
+        from duckduckgo_search import DDGS
+
+        results = DDGS().text(q, max_results=limit)
+    except ImportError:
+        return "Web search requires the 'duckduckgo-search' package. Install it with: pip install roshni[web]"
     except Exception as e:
         return f"Web search failed: {e}"
 
+    if not results:
+        return f"No web results found for '{query}'."
+
     lines: list[str] = []
-    abstract = (data.get("AbstractText") or "").strip()
-    abstract_url = (data.get("AbstractURL") or "").strip()
-    if abstract:
-        if abstract_url:
-            lines.append(f"1. {abstract}\n   Source: {abstract_url}")
-        else:
-            lines.append(f"1. {abstract}")
+    first_url: str | None = None
+    for i, r in enumerate(results, 1):
+        title = r.get("title", "")
+        href = r.get("href", "")
+        body = r.get("body", "")
+        if i == 1:
+            first_url = href
+        line = f"{i}. {title}"
+        if body:
+            line += f"\n   {body}"
+        if href:
+            line += f"\n   Source: {href}"
+        lines.append(line)
 
-    topics = data.get("RelatedTopics") or []
-    count = len(lines)
-    for topic in topics:
-        if count >= limit:
-            break
-        if isinstance(topic, dict) and "Topics" in topic:
-            for nested in topic.get("Topics", []):
-                if count >= limit:
-                    break
-                text = (nested.get("Text") or "").strip()
-                first_url = (nested.get("FirstURL") or "").strip()
-                if text:
-                    count += 1
-                    lines.append(f"{count}. {text}\n   Source: {first_url}")
-        else:
-            text = (topic.get("Text") or "").strip() if isinstance(topic, dict) else ""
-            first_url = (topic.get("FirstURL") or "").strip() if isinstance(topic, dict) else ""
-            if text:
-                count += 1
-                lines.append(f"{count}. {text}\n   Source: {first_url}")
+    output = "\n".join(lines)
 
-    if not lines:
-        return f"No quick web results found for '{query}'."
-    return "\n".join(lines)
+    # Auto-fetch first result page for richer context
+    if auto_fetch and first_url:
+        try:
+            fetched = _fetch_webpage(first_url)
+            output += f"\n\n---\n{fetched}"
+        except Exception:
+            pass  # silently skip on fetch failure
+
+    return output
 
 
 def _fetch_webpage(url: str, max_chars: int = 2500) -> str:
@@ -154,16 +157,25 @@ def create_builtin_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="search_web",
-            description="Search the web and return quick results with source links. Read-only.",
+            description=(
+                "Search the web and return results with source links."
+                " Automatically fetches first result for richer context. Read-only."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "Search query"},
                     "limit": {"type": "integer", "description": "Number of results (1-10)"},
+                    "auto_fetch": {
+                        "type": "boolean",
+                        "description": "Fetch and append first result page content (default true)",
+                    },
                 },
                 "required": ["query"],
             },
-            function=lambda query, limit=5: _web_search(query, max(1, min(int(limit), 10))),
+            function=lambda query, limit=5, auto_fetch=True: _web_search(
+                query, max(1, min(int(limit), 10)), auto_fetch=auto_fetch
+            ),
             permission="read",
         ),
         ToolDefinition(

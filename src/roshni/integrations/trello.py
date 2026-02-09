@@ -134,6 +134,8 @@ class TrelloClient:
                 "fields": "id,name,desc,due,idList,idBoard,labels,url,closed,dateLastActivity",
                 "actions": "commentCard",
                 "actions_limit": 20,
+                "checklists": "all",
+                "checklist_fields": "name",
             },
         )
 
