@@ -39,8 +39,8 @@ PROVIDER_SETUP_GUIDES: dict[str, str] = {
     "gemini": (
         "1. Go to: https://aistudio.google.com/apikey\n"
         "2. Sign in with your Google account\n"
-        "3. Click \"Create API Key\"\n"
-        "4. Select or create a project, then click \"Create\"\n"
+        '3. Click "Create API Key"\n'
+        '4. Select or create a project, then click "Create"\n'
         "5. Copy the key and paste it below\n"
         "\n"
         "Free tier available — no credit card needed."
@@ -48,7 +48,7 @@ PROVIDER_SETUP_GUIDES: dict[str, str] = {
     "openai": (
         "1. Go to: https://platform.openai.com/api-keys\n"
         "2. Sign in or create an account\n"
-        "3. Click \"Create new secret key\"\n"
+        '3. Click "Create new secret key"\n'
         "4. Copy the key and paste it below\n"
         "\n"
         "Free trial credits available for new accounts."
@@ -56,7 +56,7 @@ PROVIDER_SETUP_GUIDES: dict[str, str] = {
     "anthropic": (
         "1. Go to: https://console.anthropic.com/settings/keys\n"
         "2. Sign in or create an account\n"
-        "3. Click \"Create Key\"\n"
+        '3. Click "Create Key"\n'
         "4. Copy the key and paste it below"
     ),
     "deepseek": (
@@ -76,7 +76,7 @@ PROVIDER_SETUP_GUIDES: dict[str, str] = {
     "groq": (
         "1. Go to: https://console.groq.com/keys\n"
         "2. Sign in or create an account\n"
-        "3. Click \"Create API Key\"\n"
+        '3. Click "Create API Key"\n'
         "4. Copy the key and paste it below\n"
         "\n"
         "Free tier available — very fast inference."
@@ -272,10 +272,7 @@ def _step_identity(existing_config: dict) -> tuple[str, str, str]:
     tones = list(TONE_DESCRIPTIONS.keys()) + ["custom"]
     default_tone = existing_config.get("bot", {}).get("tone", "friendly")
 
-    tone_choices = [
-        Choice(title=f"{t.capitalize()} — {TONE_DESCRIPTIONS[t]}", value=t)
-        for t in TONE_DESCRIPTIONS
-    ]
+    tone_choices = [Choice(title=f"{t.capitalize()} — {TONE_DESCRIPTIONS[t]}", value=t) for t in TONE_DESCRIPTIONS]
     tone_choices.append(Choice(title="Custom — describe your own", value="custom"))
 
     tone = _ask_select(
@@ -337,9 +334,7 @@ def _step_ai_provider(existing_config: dict, existing_secrets: dict) -> tuple[st
             fb_choices,
             default=existing_fallback if existing_fallback in fallback_options else fallback_options[0],
         )
-        configured[fallback_provider] = _prompt_api_key(
-            fallback_provider, existing_api_keys.get(fallback_provider, "")
-        )
+        configured[fallback_provider] = _prompt_api_key(fallback_provider, existing_api_keys.get(fallback_provider, ""))
 
     return provider, fallback_provider, configured
 
@@ -370,9 +365,7 @@ def _step_vault(existing_config: dict, bot_name: str) -> tuple[str, str]:
     return vault_path, agent_dir
 
 
-def _step_integrations(
-    existing_config: dict, existing_secrets: dict
-) -> tuple[dict, dict]:
+def _step_integrations(existing_config: dict, existing_secrets: dict) -> tuple[dict, dict]:
     """Step 5: Integrations. Returns (integrations_config, secrets_updates)."""
     console.print("\n[bold]Step 4 · Integrations[/bold]")
     console.print("  Connect the services you want your bot to help with. You can add more later.\n")
@@ -396,9 +389,7 @@ def _step_integrations(
     google_credentials_path = str(
         Path(google_cfg.get("credentials_path", "~/.roshni/google/client_secret.json")).expanduser()
     )
-    google_token_path = str(
-        Path(google_cfg.get("token_path", "~/.roshni/google/token.pickle")).expanduser()
-    )
+    google_token_path = str(Path(google_cfg.get("token_path", "~/.roshni/google/token.pickle")).expanduser())
     google_scopes: dict = google_cfg.get("scopes", {}) or {}
     selected_services: list[str] = []
 
@@ -469,9 +460,9 @@ def _step_integrations(
             _show_guide(
                 "Trello Setup",
                 "1. Go to: https://trello.com/power-ups/admin\n"
-                "2. Click \"New\" to create a Power-Up\n"
-                "3. Fill in a name (e.g., \"Roshni Bot\") and your workspace\n"
-                "4. After creation, click \"Generate a new API key\"\n"
+                '2. Click "New" to create a Power-Up\n'
+                '3. Fill in a name (e.g., "Roshni Bot") and your workspace\n'
+                '4. After creation, click "Generate a new API key"\n'
                 "5. Copy the API key, then click the Token link to authorize\n"
                 "6. Copy the token value",
             )
@@ -484,9 +475,7 @@ def _step_integrations(
                 raise click.Abort()
             trello_token = tok
 
-        trello_disable_board_delete = _ask_confirm(
-            "Disable permanent board deletion? (recommended)", default=True
-        )
+        trello_disable_board_delete = _ask_confirm("Disable permanent board deletion? (recommended)", default=True)
         secrets_updates["trello"] = {"api_key": trello_api_key, "token": trello_token}
 
     # --- 5c: Notion ---
@@ -503,8 +492,8 @@ def _step_integrations(
             _show_guide(
                 "Notion Setup",
                 "1. Go to: https://www.notion.so/my-integrations\n"
-                "2. Click \"New integration\"\n"
-                "3. Give it a name (e.g., \"Roshni Bot\") and select your workspace\n"
+                '2. Click "New integration"\n'
+                '3. Give it a name (e.g., "Roshni Bot") and select your workspace\n'
                 "4. Copy the Internal Integration Token\n"
                 "5. Go to the database you want to connect\n"
                 "6. Click ••• → Add connections → select your integration",
@@ -529,9 +518,7 @@ def _step_integrations(
             "  [dim]On your iPhone: Health app → profile picture → Export All Health Data → "
             "share the zip to your Mac → unzip it[/dim]"
         )
-        healthkit_export_path = str(
-            Path(_ask_text("Path to export.xml:", default=healthkit_export_path)).expanduser()
-        )
+        healthkit_export_path = str(Path(_ask_text("Path to export.xml:", default=healthkit_export_path)).expanduser())
 
     # --- 5e: Fitbit ---
     fitbit_cfg = integrations.get("fitbit", {}) or {}
@@ -542,9 +529,7 @@ def _step_integrations(
     fitbit_client_secret = existing_secrets.get("fitbit", {}).get("client_secret", "")
 
     if fitbit_enabled:
-        if not fitbit_client_id or _ask_confirm(
-            "Set/change Fitbit credentials?", default=not bool(fitbit_client_id)
-        ):
+        if not fitbit_client_id or _ask_confirm("Set/change Fitbit credentials?", default=not bool(fitbit_client_id)):
             _show_guide(
                 "Fitbit API Setup",
                 "1. Go to: https://dev.fitbit.com/apps/new\n"
@@ -660,9 +645,7 @@ def _step_platform(existing_config: dict, existing_secrets: dict) -> tuple[str, 
                 raise click.Abort()
             telegram_token = tok
 
-        if not telegram_user_id or _ask_confirm(
-            "Set up your Telegram user ID?", default=not bool(telegram_user_id)
-        ):
+        if not telegram_user_id or _ask_confirm("Set up your Telegram user ID?", default=not bool(telegram_user_id)):
             _show_guide(
                 "Find Your Telegram User ID",
                 "1. Open Telegram and search for @userinfobot\n"
