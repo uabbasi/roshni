@@ -15,7 +15,7 @@ from roshni.core.llm.config import (
 
 class TestGetDefaultModel:
     def test_known_providers(self):
-        assert "gpt" in get_default_model("openai")
+        assert "gpt-5" in get_default_model("openai")
         assert "claude" in get_default_model("anthropic") or "anthropic" in get_default_model("anthropic")
         assert "gemini" in get_default_model("gemini")
 
@@ -44,8 +44,15 @@ class TestGetModelMaxTokens:
 
     def test_new_provider_limits(self):
         assert get_model_max_tokens("deepseek-chat") == 8_192
-        assert get_model_max_tokens("grok-3") == 16_384
+        assert get_model_max_tokens("grok-4-fast-non-reasoning") == 16_384
         assert get_model_max_tokens("llama-3.3-70b-versatile") == 8_192
+
+    def test_gpt5_limits(self):
+        assert get_model_max_tokens("gpt-5.2-chat-latest") == 16_384
+        assert get_model_max_tokens("gpt-5.2-pro") == 16_384
+
+    def test_llama4_limits(self):
+        assert get_model_max_tokens("llama-4-maverick-17b-128e-instruct") == 8_192
 
     def test_new_provider_default_limits(self):
         assert get_model_max_tokens("some-unknown", provider="deepseek") == 8_192
@@ -68,11 +75,17 @@ class TestInferProvider:
         assert infer_provider("gpt-4o") == "openai"
         assert infer_provider("o3") == "openai"
 
+    def test_gpt5_inferred_as_openai(self):
+        assert infer_provider("gpt-5.2-chat-latest") == "openai"
+        assert infer_provider("gpt-5.2-pro") == "openai"
+        assert infer_provider("gpt-5.2") == "openai"
+
     def test_unprefixed_claude(self):
         assert infer_provider("claude-sonnet-4-20250514") == "anthropic"
 
     def test_unprefixed_grok(self):
         assert infer_provider("grok-2") == "xai"
+        assert infer_provider("grok-4-fast-non-reasoning") == "xai"
 
     def test_default_openai(self):
         assert infer_provider("some-random-model") == "openai"
@@ -88,6 +101,48 @@ class TestModelCatalog:
                 assert isinstance(m, ModelConfig)
                 assert m.name
                 assert m.display_name
+
+    def test_is_thinking_field_exists(self):
+        """All ModelConfig entries should have the is_thinking field."""
+        for models in MODEL_CATALOG.values():
+            for m in models:
+                assert isinstance(m.is_thinking, bool)
+
+    def test_thinking_models_present(self):
+        """Each provider (except local) should have at least one thinking model."""
+        for provider, models in MODEL_CATALOG.items():
+            if provider == "local":
+                continue
+            thinking = [m for m in models if m.is_thinking]
+            assert len(thinking) >= 1, f"Provider '{provider}' has no thinking model"
+
+    def test_gpt5_in_catalog(self):
+        openai_models = MODEL_CATALOG["openai"]
+        names = [m.name for m in openai_models]
+        assert "gpt-5.2-chat-latest" in names
+        assert "gpt-5.2-pro" in names
+        assert "gpt-5.2" in names
+
+    def test_grok4_in_catalog(self):
+        xai_models = MODEL_CATALOG["xai"]
+        names = [m.name for m in xai_models]
+        assert "xai/grok-4-fast-non-reasoning" in names
+        assert "xai/grok-4-fast-reasoning" in names
+
+    def test_llama4_in_catalog(self):
+        groq_models = MODEL_CATALOG["groq"]
+        names = [m.name for m in groq_models]
+        assert "groq/llama-4-maverick-17b-128e-instruct" in names
+
+    def test_deepseek_reasoner_is_thinking(self):
+        deepseek_models = MODEL_CATALOG["deepseek"]
+        reasoner = next(m for m in deepseek_models if m.is_thinking)
+        assert "reasoner" in reasoner.name
+
+    def test_opus_is_thinking(self):
+        anthropic_models = MODEL_CATALOG["anthropic"]
+        opus = next(m for m in anthropic_models if "opus" in m.name)
+        assert opus.is_thinking is True
 
 
 class TestNewModelConstants:

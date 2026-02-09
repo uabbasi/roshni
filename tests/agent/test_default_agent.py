@@ -18,7 +18,7 @@ def config(tmp_dir):
     return Config(
         data_dir=tmp_dir,
         defaults={
-            "llm": {"provider": "openai", "model": "gpt-4o-mini"},
+            "llm": {"provider": "openai", "model": "gpt-5.2-chat-latest"},
         },
     )
 
@@ -75,7 +75,7 @@ def _make_response(content, tool_calls=None):
 class TestDefaultAgentInit:
     def test_basic_init(self, config, secrets):
         agent = DefaultAgent(config=config, secrets=secrets)
-        assert agent.model == "gpt-4o-mini"
+        assert agent.model == "gpt-5.2-chat-latest"
         assert agent.provider == "openai"
         assert agent.name == "assistant"
 
@@ -113,7 +113,7 @@ class TestDefaultAgentChat:
         assert isinstance(result, ChatResult)
         assert result.text == "Hello! How can I help?"
         assert result.tool_calls == []
-        assert result.model == "gpt-4o-mini"
+        assert result.model == "gpt-5.2-chat-latest"
 
     @patch("roshni.core.llm.client.LLMClient.completion")
     def test_chat_with_tool_call(self, mock_completion, config, secrets, echo_tool):
@@ -233,14 +233,14 @@ class TestDefaultAgentMultiProviderConfig:
                     "fallback": "openai",
                     "providers": {
                         "anthropic": {"model": "anthropic/claude-sonnet-4-20250514"},
-                        "openai": {"model": "gpt-4o-mini"},
+                        "openai": {"model": "gpt-5.2-chat-latest"},
                     },
                 },
             },
         )
         agent = DefaultAgent(config=config, secrets=secrets)
         assert agent.provider == "anthropic"
-        assert agent._llm.fallback_model == "gpt-4o-mini"
+        assert agent._llm.fallback_model == "gpt-5.2-chat-latest"
         assert agent._llm.fallback_provider == "openai"
 
     def test_fallback_uses_default_model_when_not_specified(self, tmp_dir, secrets):
@@ -266,12 +266,12 @@ class TestDefaultAgentMultiProviderConfig:
         config = Config(
             data_dir=tmp_dir,
             defaults={
-                "llm": {"provider": "openai", "model": "gpt-4o-mini"},
+                "llm": {"provider": "openai", "model": "gpt-5.2-chat-latest"},
             },
         )
         agent = DefaultAgent(config=config, secrets=secrets)
         assert agent.provider == "openai"
-        assert agent.model == "gpt-4o-mini"
+        assert agent.model == "gpt-5.2-chat-latest"
         assert agent._llm.fallback_model is None
 
     def test_no_fallback_when_not_configured(self, tmp_dir, secrets):
@@ -281,7 +281,7 @@ class TestDefaultAgentMultiProviderConfig:
                 "llm": {
                     "default": "openai",
                     "providers": {
-                        "openai": {"model": "gpt-4o-mini"},
+                        "openai": {"model": "gpt-5.2-chat-latest"},
                     },
                 },
             },

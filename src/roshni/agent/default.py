@@ -26,28 +26,6 @@ from roshni.core.llm.client import LLMClient
 from roshni.core.llm.model_selector import ModelSelector
 from roshni.core.secrets import SecretsManager
 
-# Keywords that suggest a query needs a heavier model.
-# TODO: Tune based on downstream usage patterns.
-_COMPLEX_KEYWORDS: set[str] = {
-    "analyze",
-    "compare",
-    "explain",
-    "plan",
-    "design",
-    "refactor",
-    "summarize",
-    "review",
-    "debug",
-    "evaluate",
-    "research",
-    "strategy",
-    "architect",
-    "optimize",
-    "trade-off",
-    "tradeoff",
-    "pros and cons",
-}
-
 
 class DefaultAgent(BaseAgent):
     """Tool-calling agent backed by LLMClient.
@@ -482,20 +460,15 @@ class DefaultAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     def _select_model(self, query: str, mode: str | None) -> str | None:
-        """Choose light or heavy model based on query complexity and mode."""
+        """Choose light, heavy, or thinking model via ModelSelector."""
         if not self._model_selector:
             return None
-
-        # Mode-based override
-        if mode and mode in self._heavy_modes:
-            return self._model_selector.heavy_model.name
-
-        # Keyword / length heuristic
-        query_lower = query.lower()
-        if len(query) > 150 or any(kw in query_lower for kw in _COMPLEX_KEYWORDS):
-            return self._model_selector.heavy_model.name
-
-        return self._model_selector.light_model.name
+        config = self._model_selector.select(
+            query,
+            mode=mode,
+            heavy_modes=self._heavy_modes,
+        )
+        return config.name
 
     # ------------------------------------------------------------------
     # Context compression

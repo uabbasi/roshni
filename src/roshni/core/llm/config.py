@@ -13,11 +13,11 @@ LOCAL_MODEL = "ollama/deepseek-r1"
 GOOGLE_MODEL = "gemini/gemini-2.5-flash"
 GOOGLE_PRO_MODEL = "gemini/gemini-3-pro-preview"
 GOOGLE_FLASH_MODEL = "gemini/gemini-3-flash-preview"
-OPENAI_MODEL = "gpt-4o-mini"
+OPENAI_MODEL = "gpt-5.2-chat-latest"
 ANTHROPIC_MODEL = "anthropic/claude-sonnet-4-20250514"
 ANTHROPIC_OPUS_MODEL = "anthropic/claude-opus-4-20250514"
 DEEPSEEK_MODEL = "deepseek/deepseek-chat"
-XAI_MODEL = "xai/grok-2"
+XAI_MODEL = "xai/grok-4-fast-non-reasoning"
 GROQ_MODEL = "groq/llama-3.3-70b-versatile"
 
 # --- Output token limits ---
@@ -50,9 +50,11 @@ MODEL_OUTPUT_TOKEN_LIMITS: dict[str, int] = {
     "deepseek-chat": 8_192,
     "deepseek-reasoner": 8_192,
     # xAI (Grok)
+    "grok-4": 16_384,
     "grok-3": 16_384,
     "grok-2": 8_192,
     # Groq
+    "llama-4-maverick": 8_192,
     "llama-3.3-70b": 8_192,
     "llama-3.1-8b": 8_192,
     "deepseek-r1-distill": 16_384,
@@ -88,43 +90,55 @@ class ModelConfig:
     display_name: str
     provider: str = ""
     is_heavy: bool = False
+    is_thinking: bool = False
     max_tokens: int | None = None
     cost_tier: str = "medium"  # low, medium, high, free
 
 
-# Model catalog with light and heavy options per provider.
+# Model catalog with light, heavy, and thinking options per provider.
 MODEL_CATALOG: dict[str, list[ModelConfig]] = {
     "anthropic": [
-        ModelConfig("anthropic/claude-haiku-4", "Claude Haiku 4", "anthropic", False, 8192, "low"),
-        ModelConfig("anthropic/claude-sonnet-4-20250514", "Claude Sonnet 4", "anthropic", False, 8192, "medium"),
-        ModelConfig("anthropic/claude-opus-4-20250514", "Claude Opus 4", "anthropic", True, 8192, "high"),
+        ModelConfig("anthropic/claude-haiku-4", "Claude Haiku 4", "anthropic", False, False, 8192, "low"),
+        ModelConfig("anthropic/claude-sonnet-4-20250514", "Claude Sonnet 4", "anthropic", True, False, 8192, "medium"),
+        ModelConfig("anthropic/claude-opus-4-20250514", "Claude Opus 4", "anthropic", True, True, 8192, "high"),
     ],
     "openai": [
-        ModelConfig("gpt-4o", "GPT-4o", "openai", False, 16384, "medium"),
-        ModelConfig("o3", "O3", "openai", True, 16384, "high"),
+        ModelConfig("gpt-5.2-chat-latest", "GPT-5.2 Chat", "openai", False, False, 16384, "medium"),
+        ModelConfig("gpt-5.2-pro", "GPT-5.2 Pro", "openai", True, False, 16384, "high"),
+        ModelConfig("gpt-5.2", "GPT-5.2", "openai", True, True, 16384, "high"),
     ],
     "gemini": [
-        ModelConfig("gemini/gemini-2.0-flash", "Gemini 2.0 Flash", "gemini", False, 8192, "low"),
-        ModelConfig("gemini/gemini-2.5-flash", "Gemini 2.5 Flash", "gemini", False, 64000, "low"),
-        ModelConfig("gemini/gemini-2.5-pro", "Gemini 2.5 Pro", "gemini", True, 64000, "medium"),
-        ModelConfig("gemini/gemini-3-flash-preview", "Gemini 3 Flash", "gemini", False, 1048576, "low"),
-        ModelConfig("gemini/gemini-3-pro-preview", "Gemini 3 Pro", "gemini", True, 1048576, "medium"),
+        ModelConfig("gemini/gemini-3-flash-preview", "Gemini 3 Flash", "gemini", False, False, 1048576, "low"),
+        ModelConfig("gemini/gemini-3-pro-preview", "Gemini 3 Pro", "gemini", True, False, 1048576, "medium"),
+        ModelConfig("gemini/gemini-2.5-pro", "Gemini 2.5 Pro (Thinking)", "gemini", True, True, 64000, "medium"),
     ],
     "deepseek": [
-        ModelConfig("deepseek/deepseek-chat", "DeepSeek Chat", "deepseek", False, 8192, "low"),
-        ModelConfig("deepseek/deepseek-reasoner", "DeepSeek Reasoner", "deepseek", True, 8192, "low"),
+        ModelConfig("deepseek/deepseek-chat", "DeepSeek Chat", "deepseek", False, False, 8192, "low"),
+        ModelConfig("deepseek/deepseek-chat", "DeepSeek Chat (Heavy)", "deepseek", True, False, 8192, "low"),
+        ModelConfig("deepseek/deepseek-reasoner", "DeepSeek Reasoner", "deepseek", True, True, 8192, "low"),
     ],
     "xai": [
-        ModelConfig("xai/grok-2", "Grok 2", "xai", False, 8192, "medium"),
-        ModelConfig("xai/grok-3", "Grok 3", "xai", True, 16384, "high"),
+        ModelConfig("xai/grok-4-fast-non-reasoning", "Grok 4 Fast", "xai", False, False, 16384, "medium"),
+        ModelConfig("xai/grok-4-fast-reasoning", "Grok 4 Fast Reasoning", "xai", True, False, 16384, "high"),
+        ModelConfig("xai/grok-4-fast-reasoning", "Grok 4 Fast Reasoning (Thinking)", "xai", True, True, 16384, "high"),
     ],
     "groq": [
-        ModelConfig("groq/llama-3.3-70b-versatile", "Llama 3.3 70B (Groq)", "groq", False, 8192, "low"),
-        ModelConfig("groq/llama-3.1-8b-instant", "Llama 3.1 8B (Groq)", "groq", False, 8192, "free"),
-        ModelConfig("groq/deepseek-r1-distill-llama-70b", "DeepSeek R1 Distill (Groq)", "groq", True, 16384, "low"),
+        ModelConfig(
+            "groq/llama-4-maverick-17b-128e-instruct",
+            "Llama 4 Maverick (Groq)",
+            "groq",
+            False,
+            False,
+            8192,
+            "low",
+        ),
+        ModelConfig("groq/llama-3.3-70b-versatile", "Llama 3.3 70B (Groq)", "groq", True, False, 8192, "low"),
+        ModelConfig(
+            "groq/deepseek-r1-distill-llama-70b", "DeepSeek R1 Distill (Groq)", "groq", True, True, 16384, "low"
+        ),
     ],
     "local": [
-        ModelConfig("ollama/deepseek-r1", "DeepSeek R1 (Local)", "local", False, 8192, "free"),
+        ModelConfig("ollama/deepseek-r1", "DeepSeek R1 (Local)", "local", False, False, 8192, "free"),
     ],
 }
 
@@ -174,7 +188,7 @@ def infer_provider(model_name: str) -> str:
     if model_name.startswith("ollama/"):
         return "local"
     # Substring-based fallbacks
-    if any(k in model_name for k in ("gpt-", "o1", "o3", "o4")):
+    if any(k in model_name for k in ("gpt-", "gpt-5", "o1", "o3", "o4")):
         return "openai"
     if "claude" in model_name:
         return "anthropic"

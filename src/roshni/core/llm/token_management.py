@@ -26,6 +26,8 @@ MODEL_CONTEXT_LIMITS = {
     "gemini-2.5-pro": 1048576,
     "gemini-2.5-flash": 1048576,
     # OpenAI
+    "gpt-5.2": 400000,
+    "gpt-5": 400000,
     "o1": 200000,
     "o3-max": 128000,
     "gpt-4o-mini": 128000,
@@ -42,6 +44,10 @@ MODEL_CONTEXT_LIMITS = {
     "claude-3-sonnet": 200000,
     "claude-2.1": 200000,
     "claude-2": 100000,
+    # xAI (Grok)
+    "grok-4": 2000000,
+    # Groq (Llama 4)
+    "llama-4-maverick": 128000,
 }
 
 # Reserve tokens for response (conservative default)
