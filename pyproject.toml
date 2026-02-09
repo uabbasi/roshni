@@ -1,6 +1,6 @@
 [project]
 name = "roshni"
-version = "0.1.0"
+version = "0.2.0"
 description = "Personal data infrastructure framework — health, finance, journals, and AI agents"
 authors = [{name = "Usman Abbasi", email = "uabbasi@gmail.com"}]
 requires-python = ">=3.11"
