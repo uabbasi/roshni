@@ -116,6 +116,14 @@ Core has minimal deps (PyYAML, loguru, python-dotenv, aiofiles). Everything else
 - **structure**: mirrors `src/roshni/` — `tests/core/`, `tests/agent/`, etc.
 - **CI matrix**: Python 3.11, 3.12, 3.13 on Ubuntu
 
+## Pre-Commit Checklist
+
+Before every commit, always run these and fix any issues:
+```bash
+uv run ruff check src/ tests/ --fix        # Lint + autofix
+uv run ruff format src/ tests/             # Format
+```
+
 ## Tool Config
 
 - **ruff**: line-length 120, rules E/F/I/B/UP/RUF

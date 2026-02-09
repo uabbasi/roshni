@@ -1,0 +1,10 @@
+{
+  "hooks": {
+    "PreCommit": [
+      {
+        "command": "uv run ruff check src/ tests/ --fix && uv run ruff format src/ tests/",
+        "description": "Run ruff lint + format before commit"
+      }
+    ]
+  }
+}
