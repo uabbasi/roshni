@@ -32,5 +32,8 @@ coverage.xml
 .DS_Store
 Thumbs.db
 
+# Claude Code (local settings are machine-specific)
+.claude/settings.local.json
+
 # uv
 uv.lock

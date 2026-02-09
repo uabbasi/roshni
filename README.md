@@ -21,12 +21,12 @@ roshni init
 ```
 
 The wizard guides you through:
-- Bot identity (name + personality)
-- LLM setup (Anthropic, OpenAI, Gemini, DeepSeek, xAI/Grok, Groq, Local/Ollama)
-- Telegram setup with allowlist security
-- Optional integrations (Gmail draft-first, Google Workspace profile, Obsidian, Trello, Notion, HealthKit import)
-- Built-ins (weather + web search/fetch)
-- Delighters (morning brief, planning, reminders)
+- Bot identity (name + personality — with arrow-key selection)
+- AI provider (Gemini default, with step-by-step setup guides for every provider)
+- Bot's Brain (vault folder for memory, tasks, and knowledge)
+- Integrations (Google services, Trello, Notion, Apple Health, Fitbit — each with setup walkthrough)
+- Safety level (one simple choice: Balanced / Read only / Full access)
+- Platform (Telegram or terminal)
 
 ### 3. Try It Immediately
 
@@ -42,13 +42,13 @@ Terminal chat is the fastest first experience. No Telegram required.
 roshni run
 ```
 
-## Security Model (Default)
+## Security Model
 
+- **Balanced** (default): Can read and search everything, create drafts/tasks/notes. Asks before sending emails or deleting anything.
+- **Read only**: Can search and read your data, but can't create or change anything.
+- **Full access**: Can do everything including send emails and delete items.
 - Telegram is deny-by-default unless your user ID is allowlisted.
-- Tool approvals happen only for write/send actions.
-- Read-only actions (chat/search/weather/fetch) do not need approval.
 - Gmail is draft-first by default (no send).
-- You can explicitly enable direct send as a higher-risk mode.
 
 ## Integrations
 
@@ -60,6 +60,7 @@ roshni run
 | Trello | Off | Medium | Boards/lists/cards/labels/comments with approvals on write actions |
 | Notion | Off | Medium | Database-backed page search/create/update/append |
 | HealthKit import | Off | Low | Reads Apple Health `export.xml` summaries |
+| Fitbit | Off | Low | Steps, sleep, heart rate via Fitbit API |
 | Notes | On | Medium | Local note writes (approval-gated) |
 | Weather | On | Low | Read-only |
 | Web search/fetch | On | Low | Read-only |
