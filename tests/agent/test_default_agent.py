@@ -290,6 +290,236 @@ class TestDefaultAgentMultiProviderConfig:
         assert agent._llm.fallback_model is None
 
 
+class TestMessageSanitization:
+    """Tests that messages sent to the LLM never contain null content or orphaned tool messages.
+
+    These reproduce real failures: OpenAI rejects messages with null content
+    and tool-role messages not preceded by an assistant message with tool_calls.
+    """
+
+    def _all_messages_have_string_content(self, messages: list[dict]) -> bool:
+        """Check that every message has a string content field (not None/missing)."""
+        for msg in messages:
+            content = msg.get("content")
+            if content is None:
+                return False
+        return True
+
+    def _no_orphaned_tool_messages(self, messages: list[dict]) -> bool:
+        """Check that every tool message is preceded by an assistant with tool_calls."""
+        for i, msg in enumerate(messages):
+            if msg.get("role") == "tool":
+                # Walk backward to find the parent assistant message
+                found_parent = False
+                for j in range(i - 1, -1, -1):
+                    if messages[j].get("role") == "assistant" and messages[j].get("tool_calls"):
+                        found_parent = True
+                        break
+                    if messages[j].get("role") in ("user", "system"):
+                        break
+                if not found_parent:
+                    return False
+        return True
+
+    @patch("roshni.core.llm.client.LLMClient.completion")
+    def test_tool_call_with_null_content_produces_empty_string(self, mock_completion, config, secrets, echo_tool):
+        """When LLM returns tool calls with content=None, history must have content=''."""
+        tool_call = MagicMock()
+        tool_call.id = "call_1"
+        tool_call.function.name = "echo"
+        tool_call.function.arguments = '{"text": "hi"}'
+
+        mock_completion.side_effect = [
+            _make_response(None, tool_calls=[tool_call]),
+            _make_response("Done"),
+        ]
+
+        agent = DefaultAgent(config=config, secrets=secrets, tools=[echo_tool])
+        agent.chat("test")
+
+        # Every message in history must have string content
+        for msg in agent.message_history:
+            assert msg.get("content") is not None, f"Message has null content: {msg}"
+            assert isinstance(msg["content"], str), f"Content is not a string: {msg}"
+
+    @patch("roshni.core.llm.client.LLMClient.completion")
+    def test_multi_turn_tool_calls_no_null_content(self, mock_completion, config, secrets, echo_tool):
+        """Multiple tool call rounds should never produce null content in messages."""
+        tc1 = MagicMock()
+        tc1.id = "call_1"
+        tc1.function.name = "echo"
+        tc1.function.arguments = '{"text": "first"}'
+
+        tc2 = MagicMock()
+        tc2.id = "call_2"
+        tc2.function.name = "echo"
+        tc2.function.arguments = '{"text": "second"}'
+
+        mock_completion.side_effect = [
+            _make_response(None, tool_calls=[tc1]),  # null content
+            _make_response(None, tool_calls=[tc2]),  # null content again
+            _make_response("All done"),
+        ]
+
+        agent = DefaultAgent(config=config, secrets=secrets, tools=[echo_tool])
+        agent.chat("test")
+
+        for msg in agent.message_history:
+            assert msg.get("content") is not None, f"Null content in: {msg}"
+
+    @patch("roshni.core.llm.client.LLMClient.completion")
+    def test_build_messages_no_null_content(self, mock_completion, config, secrets, echo_tool):
+        """The messages list passed to the LLM must never have null content."""
+        tool_call = MagicMock()
+        tool_call.id = "call_1"
+        tool_call.function.name = "echo"
+        tool_call.function.arguments = '{"text": "hi"}'
+
+        mock_completion.side_effect = [
+            _make_response(None, tool_calls=[tool_call]),
+            _make_response("Done"),
+        ]
+
+        agent = DefaultAgent(config=config, secrets=secrets, tools=[echo_tool])
+        agent.chat("test")
+
+        messages = agent._build_messages()
+        assert self._all_messages_have_string_content(messages)
+
+    def test_build_messages_strips_orphaned_tool_messages(self, config, secrets):
+        """If history trimming orphans tool messages, _build_messages must strip them."""
+        agent = DefaultAgent(config=config, secrets=secrets, max_history_messages=4)
+
+        # Simulate history that starts mid-tool-sequence (as if trimmed)
+        agent.message_history = [
+            {"role": "tool", "tool_call_id": "call_old", "content": "orphaned result"},
+            {"role": "tool", "tool_call_id": "call_old2", "content": "another orphan"},
+            {"role": "user", "content": "new message"},
+            {"role": "assistant", "content": "response"},
+        ]
+
+        messages = agent._build_messages()
+        non_system = [m for m in messages if m["role"] != "system"]
+
+        # The orphaned tool messages should be stripped
+        assert non_system[0]["role"] == "user"
+        assert self._no_orphaned_tool_messages(messages)
+
+    def test_build_messages_strips_orphaned_assistant_with_tool_calls(self, config, secrets):
+        """An assistant message with tool_calls but no following tool results should be stripped."""
+        agent = DefaultAgent(config=config, secrets=secrets, max_history_messages=4)
+
+        agent.message_history = [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {"name": "x", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "user", "content": "new message"},
+            {"role": "assistant", "content": "response"},
+        ]
+
+        messages = agent._build_messages()
+        non_system = [m for m in messages if m["role"] != "system"]
+
+        # The orphaned assistant+tool_calls should be stripped
+        assert non_system[0]["role"] == "user"
+
+    def test_build_messages_preserves_valid_tool_sequence(self, config, secrets):
+        """A complete tool sequence (assistant+tool_calls → tool results) should be kept."""
+        agent = DefaultAgent(config=config, secrets=secrets, max_history_messages=20)
+
+        agent.message_history = [
+            {"role": "user", "content": "do something"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {"name": "x", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "c1", "content": "result"},
+            {"role": "assistant", "content": "done"},
+        ]
+
+        messages = agent._build_messages()
+        non_system = [m for m in messages if m["role"] != "system"]
+
+        assert len(non_system) == 4
+        assert non_system[0]["role"] == "user"
+        assert non_system[1]["role"] == "assistant"
+        assert non_system[2]["role"] == "tool"
+        assert non_system[3]["role"] == "assistant"
+
+    def test_build_messages_sanitizes_null_content_anywhere(self, config, secrets):
+        """Any message with content=None in history must be sanitized to a string."""
+        agent = DefaultAgent(config=config, secrets=secrets, max_history_messages=20)
+
+        # Simulate history with null content scattered throughout
+        # (could happen from prior buggy code, deserialization, or provider quirks)
+        agent.message_history = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": None},  # null!
+            {"role": "user", "content": "next"},
+            {
+                "role": "assistant",
+                "content": "ok",
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {"name": "x", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "c1", "content": None},  # null tool result!
+            {"role": "assistant", "content": "done"},
+        ]
+
+        messages = agent._build_messages()
+        assert self._all_messages_have_string_content(messages)
+
+    @patch("roshni.core.llm.client.LLMClient.completion")
+    def test_prior_turn_tool_calls_dont_corrupt_next_turn(self, mock_completion, config, secrets, echo_tool):
+        """Tool calls from a prior turn shouldn't cause errors on the next user message.
+
+        Reproduces: boot actuation leaves tool messages in history, then user message fails.
+        """
+        tool_call = MagicMock()
+        tool_call.id = "call_boot"
+        tool_call.function.name = "echo"
+        tool_call.function.arguments = '{"text": "setup"}'
+
+        # Turn 1: tool call with null content
+        mock_completion.side_effect = [
+            _make_response(None, tool_calls=[tool_call]),
+            _make_response("Boot done"),
+        ]
+
+        agent = DefaultAgent(config=config, secrets=secrets, tools=[echo_tool])
+        agent.chat("boot prompt")
+
+        # Turn 2: normal user message — should not fail
+        mock_completion.side_effect = [_make_response("Hello!")]
+        result = agent.chat("hi are you up?")
+
+        # Must succeed and messages must be clean
+        assert "went wrong" not in result.text.lower()
+        messages = agent._build_messages()
+        assert self._all_messages_have_string_content(messages)
+        assert self._no_orphaned_tool_messages(messages)
+
+
 class TestDefaultAgentBuildMessages:
     def test_includes_system_prompt(self, config, secrets):
         agent = DefaultAgent(config=config, secrets=secrets, system_prompt="Be helpful.")

@@ -237,6 +237,7 @@ def create_task_tools(
             },
             function=create_task,
             permission="write",
+            requires_approval=False,
         ),
         ToolDefinition(
             name="update_task",
@@ -256,6 +257,7 @@ def create_task_tools(
             },
             function=update_task,
             permission="write",
+            requires_approval=False,
         ),
         ToolDefinition(
             name="transition_task",
@@ -273,6 +275,7 @@ def create_task_tools(
             },
             function=transition_task,
             permission="write",
+            requires_approval=False,
         ),
         ToolDefinition(
             name="plan_project",
@@ -291,6 +294,7 @@ def create_task_tools(
             },
             function=plan_project,
             permission="write",
+            requires_approval=False,
         ),
         # FULL
         ToolDefinition(

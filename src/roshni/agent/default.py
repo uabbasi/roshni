@@ -14,11 +14,13 @@ import json
 import re
 import threading
 from collections.abc import Callable
+from pathlib import Path
 from time import time
 from typing import Any
 
 from loguru import logger
 
+from roshni.agent.approval import ApprovalStore
 from roshni.agent.base import BaseAgent, ChatResult
 from roshni.agent.tools import ToolDefinition
 from roshni.core.config import Config
@@ -95,6 +97,17 @@ class DefaultAgent(BaseAgent):
         self._pending_approval: dict[str, Any] | None = None
         self._require_write_approval = bool(config.get("security.require_write_approval", True))
 
+        # Approval grant store (persistent memory of user approvals)
+        default_data_dir = config.get("paths.data_dir", "~/.roshni")
+        grants_path = config.get(
+            "security.approval_grants_path",
+            str(Path(default_data_dir).expanduser() / "memory" / "approval-grants.json"),
+        )
+        self._approval_store = ApprovalStore(grants_path)
+
+        # Channels that skip approval entirely (no user present)
+        self._auto_approve_channels: set[str] = set(config.get("security.auto_approve_channels", []) or [])
+
         # Memory system
         self._memory_manager = None
         if memory_path:
@@ -165,6 +178,7 @@ class DefaultAgent(BaseAgent):
                 mode=mode,
                 selected_model=selected_model,
                 clear_history=clear_history,
+                channel=channel,
             )
             if self._pending_approval:
                 # Approval bail — _run_tool_loop set _pending_approval
@@ -192,6 +206,7 @@ class DefaultAgent(BaseAgent):
                     mode=mode,
                     selected_model=selected_model,
                     clear_history=clear_history,
+                    channel=channel,
                 )
                 if self._pending_approval:
                     prompt = self.message_history[-1].get("content", "")
@@ -260,6 +275,7 @@ class DefaultAgent(BaseAgent):
         mode: str | None = None,
         selected_model: str | None = None,
         clear_history: bool = False,
+        channel: str | None = None,
     ) -> None:
         """Execute LLM → tool calls → record results loop.
 
@@ -281,9 +297,11 @@ class DefaultAgent(BaseAgent):
             assistant_message = choice.message
 
             # Add assistant response to history
-            msg_dict: dict[str, Any] = {"role": "assistant"}
-            if assistant_message.content:
-                msg_dict["content"] = self._normalize_content(assistant_message.content)
+            # Always include content as a string — OpenAI rejects null content
+            msg_dict: dict[str, Any] = {
+                "role": "assistant",
+                "content": self._normalize_content(assistant_message.content) if assistant_message.content else "",
+            }
             if hasattr(assistant_message, "tool_calls") and assistant_message.tool_calls:
                 msg_dict["tool_calls"] = [
                     {
@@ -319,7 +337,7 @@ class DefaultAgent(BaseAgent):
 
                 tool = tool_map.get(fn_name)
                 if tool:
-                    if self._should_require_approval(tool):
+                    if self._should_require_approval(tool, channel=channel):
                         try:
                             parsed_args = json.loads(fn_args) if isinstance(fn_args, str) else fn_args
                         except json.JSONDecodeError:
@@ -397,7 +415,27 @@ class DefaultAgent(BaseAgent):
             history = list(self.message_history)
             if self.max_history_messages and len(history) > self.max_history_messages:
                 history = history[-self.max_history_messages :]
+
+        # Sanitize: ensure history starts at a valid boundary.
+        # After trimming, we may land mid-tool-sequence — e.g. orphaned
+        # tool-result messages or an assistant+tool_calls without its results.
+        # Strip until we reach a user message or a plain assistant message.
+        while history:
+            role = history[0].get("role")
+            if role == "user":
+                break
+            if role == "assistant" and not history[0].get("tool_calls"):
+                break
+            history.pop(0)
+
         messages.extend(history)
+
+        # Final pass: ensure every message has string content.
+        # Some providers return null content on tool-call-only responses,
+        # and OpenAI rejects any message with content=null.
+        for msg in messages:
+            if msg.get("content") is None:
+                msg["content"] = ""
 
         return messages
 
@@ -627,8 +665,12 @@ class DefaultAgent(BaseAgent):
     # Approval workflow
     # ------------------------------------------------------------------
 
-    def _should_require_approval(self, tool: ToolDefinition) -> bool:
-        return self._require_write_approval and tool.needs_approval()
+    def _should_require_approval(self, tool: ToolDefinition, *, channel: str | None = None) -> bool:
+        if channel and channel in self._auto_approve_channels:
+            return False
+        if not (self._require_write_approval and tool.needs_approval()):
+            return False
+        return not self._approval_store.is_approved(tool.name)
 
     @staticmethod
     def _approval_decision(message: str) -> str:
@@ -674,6 +716,7 @@ class DefaultAgent(BaseAgent):
         if decision == "approve":
             result = tool.execute(raw_args)
             tool_call_log.append({"name": tool_name, "args": raw_args, "result": result})
+            self._approval_store.grant(tool_name)
             self._pending_approval = None
             text = f"Approved and executed `{tool_name}`.\n\n{result}"
             self.message_history.append({"role": "assistant", "content": text})

@@ -299,6 +299,10 @@ class LLMClient:
         kwargs["model"] = self.fallback_model
         kwargs["max_tokens"] = min(kwargs.get("max_tokens", fallback_limit), fallback_limit)
 
+        # Gemini 3 models require temperature >= 1.0 to avoid degraded performance
+        if "gemini-3" in self.fallback_model and kwargs.get("temperature", 1.0) < 1.0:
+            kwargs["temperature"] = 1.0
+
         if is_async:
             return self._afallback_completion(kwargs, litellm)
 

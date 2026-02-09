@@ -299,6 +299,7 @@ def create_delighter_tools(reminders_path: str, tasks_dir: str = "") -> list[Too
             },
             function=lambda text, due="", category="general": _save_reminder(path, text, due, category),
             permission="write",
+            requires_approval=False,
         ),
         ToolDefinition(
             name="list_reminders",
@@ -321,5 +322,6 @@ def create_delighter_tools(reminders_path: str, tasks_dir: str = "") -> list[Too
             },
             function=lambda reminder_id: _complete_reminder(path, reminder_id),
             permission="write",
+            requires_approval=False,
         ),
     ]
