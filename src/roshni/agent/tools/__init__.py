@@ -58,12 +58,15 @@ class ToolDefinition:
 
     def to_litellm_schema(self) -> dict[str, Any]:
         """Convert to litellm/OpenAI function calling format."""
+        params = self.parameters
+        if params.get("type") == "object" and "properties" not in params:
+            params = {**params, "properties": {}}
         return {
             "type": "function",
             "function": {
                 "name": self.name,
                 "description": self.description,
-                "parameters": self.parameters,
+                "parameters": params,
             },
         }
 
