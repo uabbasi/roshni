@@ -11,6 +11,7 @@ The default file layout expected::
         SOUL.md       — values and mission
         USER.md       — who the user is, preferences, goals
         AGENTS.md     — operational policies, permissions, delegation
+        TOOLS.md      — environment-specific tool guidance and context
 
 Each file is optional; missing files are silently skipped.
 """
@@ -18,9 +19,18 @@ Each file is optional; missing files are silently skipped.
 from __future__ import annotations
 
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 
 from loguru import logger
+
+
+class PromptMode(Enum):
+    """Controls how much of the persona is included in the system prompt."""
+
+    FULL = "full"  # All sections
+    COMPACT = "compact"  # Identity preamble + user + mode hints only
+    MINIMAL = "minimal"  # Identity preamble only (1-2 sentences)
 
 
 def _read_md(config_dir: Path, filename: str) -> str:
@@ -95,12 +105,15 @@ def get_system_prompt(
     include_user: bool = True,
     include_agents: bool = True,
     include_identity: bool = True,
+    include_tools: bool = True,
     extra_sections: list[str] | None = None,
     include_timestamp: bool = True,
     identity_file: str = "IDENTITY.md",
     soul_file: str = "SOUL.md",
     user_file: str = "USER.md",
     agents_file: str = "AGENTS.md",
+    tools_file: str = "TOOLS.md",
+    mode: PromptMode = PromptMode.FULL,
 ) -> str:
     """Build a system prompt prefix from markdown config files.
 
@@ -109,8 +122,16 @@ def get_system_prompt(
     2. soul — values and mission
     3. user — who the user is, preferences, goals
     4. agents — operational policies (permissions, delegation)
-    5. identity channel/agent overrides — presentation details
-    6. any extra sections appended at the end
+    5. tools — environment-specific tool guidance and context
+    6. identity channel/agent overrides — presentation details
+    7. any extra sections appended at the end
+
+    The *mode* parameter controls how much is included:
+
+    - ``FULL``: all sections (default, current behavior)
+    - ``COMPACT``: identity preamble + user + tools only
+      (skips SOUL.md, AGENTS.md, channel/agent overrides)
+    - ``MINIMAL``: identity preamble only (1-2 sentences)
 
     Args:
         config_dir: Directory containing the markdown config files.
@@ -120,12 +141,15 @@ def get_system_prompt(
         include_user: Include user file content.
         include_agents: Include agents file content.
         include_identity: Include identity file content.
+        include_tools: Include tools file content.
         extra_sections: Additional text blocks to append.
         include_timestamp: Prepend current date/time header.
         identity_file: Filename for the identity config.
         soul_file: Filename for the soul config.
         user_file: Filename for the user config.
         agents_file: Filename for the agents config.
+        tools_file: Filename for the tools config.
+        mode: Prompt mode controlling verbosity (FULL, COMPACT, MINIMAL).
 
     Returns:
         Combined system prompt prefix string.
@@ -140,6 +164,39 @@ def get_system_prompt(
         if preamble:
             sections.append(preamble)
 
+    # MINIMAL mode: identity preamble only
+    if mode == PromptMode.MINIMAL:
+        if not sections:
+            return ""
+        prompt = "\n\n---\n\n".join(sections)
+        if include_timestamp:
+            now = datetime.now().astimezone()
+            header = f"CURRENT DATE: {now.strftime('%Y-%m-%d')}\nCURRENT TIME: {now.strftime('%I:%M %p %Z')}\n"
+            prompt = header + prompt
+        return prompt
+
+    # COMPACT mode: preamble + user + tools (skip soul, agents, channel/agent overrides)
+    if mode == PromptMode.COMPACT:
+        if include_user:
+            user = _read_md(config_path, user_file)
+            if user:
+                sections.append(user)
+        if include_tools:
+            tools = _read_md(config_path, tools_file)
+            if tools:
+                sections.append(tools)
+        if extra_sections:
+            sections.extend(s for s in extra_sections if s)
+        if not sections:
+            return ""
+        prompt = "\n\n---\n\n".join(sections)
+        if include_timestamp:
+            now = datetime.now().astimezone()
+            header = f"CURRENT DATE: {now.strftime('%Y-%m-%d')}\nCURRENT TIME: {now.strftime('%I:%M %p %Z')}\n"
+            prompt = header + prompt
+        return prompt
+
+    # FULL mode: everything
     if include_soul:
         soul = _read_md(config_path, soul_file)
         if soul:
@@ -154,6 +211,11 @@ def get_system_prompt(
         agents = _read_md(config_path, agents_file)
         if agents:
             sections.append(agents)
+
+    if include_tools:
+        tools = _read_md(config_path, tools_file)
+        if tools:
+            sections.append(tools)
 
     if identity:
         if channel:

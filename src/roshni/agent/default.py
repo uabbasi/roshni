@@ -39,6 +39,26 @@ from roshni.core.secrets import SecretsManager
 from .session import Session, SessionStore, Turn
 
 
+def _build_runtime_context(
+    *,
+    model: str,
+    provider: str,
+    agent_name: str,
+) -> str:
+    """Build a short runtime metadata block for system prompt injection."""
+    import platform
+    import sys
+
+    parts = [
+        f"agent={agent_name}",
+        f"model={model}",
+        f"provider={provider}",
+        f"python={sys.version_info.major}.{sys.version_info.minor}",
+        f"os={platform.system()} ({platform.machine()})",
+    ]
+    return f"[RUNTIME] {' '.join(parts)}"
+
+
 class DefaultAgent(BaseAgent):
     """Tool-calling agent backed by LLMClient.
 
@@ -68,6 +88,10 @@ class DefaultAgent(BaseAgent):
         on_chat_complete: Callable[[str, str, list[dict]], None] | None = None,
         event_bus: EventBus | None = None,
         session_store: SessionStore | None = None,
+        max_tool_result_chars: int = 4000,
+        archive_dir: str | None = None,
+        min_context_tokens: int = 4096,
+        tool_policy: Any | None = None,
     ):
         super().__init__(name=name)
 
@@ -85,16 +109,26 @@ class DefaultAgent(BaseAgent):
         self._event_bus = event_bus
         self._session_store = session_store
         self._active_session_id: str | None = None
+        self._max_tool_result_chars = max_tool_result_chars
+        self._archive_dir = archive_dir
+        self._min_context_tokens = min_context_tokens
+        self._tool_policy = tool_policy
 
         # Build system prompt
         if system_prompt:
             resolved_prompt = system_prompt
+            self._persona_prompt_compact = system_prompt
+            self._persona_prompt_minimal = system_prompt
         elif persona_dir:
-            from roshni.agent.persona import get_system_prompt
+            from roshni.agent.persona import PromptMode, get_system_prompt
 
             resolved_prompt = get_system_prompt(persona_dir)
+            self._persona_prompt_compact = get_system_prompt(persona_dir, mode=PromptMode.COMPACT)
+            self._persona_prompt_minimal = get_system_prompt(persona_dir, mode=PromptMode.MINIMAL)
         else:
             resolved_prompt = "You are a helpful personal AI assistant."
+            self._persona_prompt_compact = resolved_prompt
+            self._persona_prompt_minimal = resolved_prompt
 
         # Store persona separately — stable prefix for caching
         self._persona_prompt = resolved_prompt
@@ -130,6 +164,13 @@ class DefaultAgent(BaseAgent):
 
             self._memory_manager = MemoryManager(memory_path)
             self.tools.append(create_save_memory_tool(self._memory_manager))
+
+        # Runtime context (injected into dynamic portion of system message)
+        self._runtime_context = _build_runtime_context(
+            model=self._llm.model,
+            provider=self._llm.provider,
+            agent_name=name,
+        )
 
     @property
     def model(self) -> str:
@@ -191,13 +232,19 @@ class DefaultAgent(BaseAgent):
             )
 
         try:
+            # Apply tool policy filtering
+            if self._tool_policy and self.tools:
+                effective_tools = self._tool_policy.filter_tools(self.tools, channel=channel, agent_name=self.name)
+            else:
+                effective_tools = self.tools
+
             if self._pending_approval:
                 result = self._handle_pending_approval(message, tool_call_log)
                 if result is not None:
                     return result
                 # Approved/denied — tools already executed, resume LLM loop
                 selected_model = self._select_model(message, mode)
-                tool_schemas = [t.to_litellm_schema() for t in self.tools] if self.tools else None
+                tool_schemas = [t.to_litellm_schema() for t in effective_tools] if effective_tools else None
             else:
                 # Track where this turn begins (for clear_history slicing)
                 self._turn_start = len(self.message_history)
@@ -213,7 +260,7 @@ class DefaultAgent(BaseAgent):
                 selected_model = self._select_model(message, mode)
 
                 # Build tool schemas
-                tool_schemas = [t.to_litellm_schema() for t in self.tools] if self.tools else None
+                tool_schemas = [t.to_litellm_schema() for t in effective_tools] if effective_tools else None
 
             # --- Main tool loop ---
             self._run_tool_loop(
@@ -256,6 +303,7 @@ class DefaultAgent(BaseAgent):
                     selected_model=selected_model,
                     clear_history=clear_history,
                     channel=channel,
+                    prompt_mode="compact",
                 )
                 if self._pending_approval:
                     prompt = self._build_approval_prompt(
@@ -343,6 +391,17 @@ class DefaultAgent(BaseAgent):
         self._pending_approval = None
 
     # ------------------------------------------------------------------
+    # Tool result truncation
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _truncate_tool_result(result: str, max_chars: int) -> str:
+        """Truncate a tool result string if it exceeds *max_chars*."""
+        if len(result) <= max_chars:
+            return result
+        return result[:max_chars] + f"\n\n[TRUNCATED: {len(result)} chars, showing first {max_chars}]"
+
+    # ------------------------------------------------------------------
     # Tool loop
     # ------------------------------------------------------------------
 
@@ -357,6 +416,7 @@ class DefaultAgent(BaseAgent):
         selected_model: str | None = None,
         clear_history: bool = False,
         channel: str | None = None,
+        prompt_mode: str = "full",
     ) -> None:
         """Execute LLM → tool calls → record results loop.
 
@@ -370,10 +430,23 @@ class DefaultAgent(BaseAgent):
             if steering:
                 self.message_history.append({"role": "user", "content": f"[STEERING] {steering}"})
 
-            messages = self._build_messages(mode=mode, clear_history=clear_history)
+            messages = self._build_messages(mode=mode, clear_history=clear_history, prompt_mode=prompt_mode)
+
+            # Context window guard — stop loop if context is nearly full
+            if not self._has_sufficient_context(messages):
+                logger.warning("Context window nearly full, stopping tool loop")
+                break
+
+            # Build thinking config if the selected model has a thinking budget
+            thinking_kwargs: dict[str, Any] | None = None
+            model_cfg = getattr(self, "_last_selected_model_config", None)
+            if model_cfg and getattr(model_cfg, "thinking_budget_tokens", None):
+                thinking_kwargs = {"type": "enabled", "budget_tokens": model_cfg.thinking_budget_tokens}
 
             # Call LLM via LLMClient (budget + usage + retries)
-            response = self._llm.completion(messages, tools=tool_schemas, model=selected_model)
+            response = self._llm.completion(
+                messages, tools=tool_schemas, model=selected_model, thinking=thinking_kwargs
+            )
             choice = response.choices[0]
             assistant_message = choice.message
 
@@ -456,6 +529,9 @@ class DefaultAgent(BaseAgent):
                         )
                     )
 
+                # Truncate oversized tool results
+                result = self._truncate_tool_result(str(result), self._max_tool_result_chars)
+
                 tool_call_log.append(
                     {
                         "name": fn_name,
@@ -477,31 +553,52 @@ class DefaultAgent(BaseAgent):
     # Message building
     # ------------------------------------------------------------------
 
-    def _build_messages(self, *, mode: str | None = None, clear_history: bool = False) -> list[dict[str, Any]]:
+    def _build_messages(
+        self,
+        *,
+        mode: str | None = None,
+        clear_history: bool = False,
+        prompt_mode: str = "full",
+    ) -> list[dict[str, Any]]:
         """Build the messages list with system prompt, memory, and trimmed history.
 
         Args:
             mode: Optional mode hint key.
             clear_history: When True (heartbeat/scheduled calls), only include
                 messages from the current turn to reduce token usage.
+            prompt_mode: One of ``"full"``, ``"compact"``, ``"minimal"``.
+                Controls which persona prompt variant to use.
         """
         from roshni.core.llm.caching import build_cached_system_message
 
         messages: list[dict[str, Any]] = []
 
-        if self._persona_prompt:
+        # Select persona prompt variant
+        if prompt_mode == "minimal":
+            persona = self._persona_prompt_minimal
+        elif prompt_mode == "compact":
+            persona = self._persona_prompt_compact
+        else:
+            persona = self._persona_prompt
+
+        if persona:
             # Stable portion: persona (changes rarely, cacheable)
-            # Dynamic portion: memory + mode hints (changes per call)
+            # Dynamic portion: memory + daily notes + runtime + mode hints (changes per call)
             dynamic_parts: list[str] = []
             if self._memory_manager:
                 mem_ctx = self._memory_manager.get_context()
                 if mem_ctx:
                     dynamic_parts.append(mem_ctx)
+                daily_ctx = self._memory_manager.get_daily_context()
+                if daily_ctx:
+                    dynamic_parts.append(daily_ctx)
+            if self._runtime_context:
+                dynamic_parts.append(self._runtime_context)
             if mode and mode in self._mode_hints:
                 dynamic_parts.append(f"MODE HINT: {self._mode_hints[mode]}")
 
             system_msg = build_cached_system_message(
-                stable_text=self._persona_prompt,
+                stable_text=persona,
                 dynamic_text="\n\n".join(dynamic_parts) if dynamic_parts else None,
                 provider=self._llm.provider,
             )
@@ -582,7 +679,7 @@ class DefaultAgent(BaseAgent):
         self.message_history.append(
             {"role": "user", "content": "Based on all the tool results above, provide a complete written response."}
         )
-        messages = self._build_messages()
+        messages = self._build_messages(prompt_mode="minimal")
         try:
             response = self._llm.completion(messages, model=selected_model)
             text = response.choices[0].message.content or ""
@@ -606,7 +703,46 @@ class DefaultAgent(BaseAgent):
             mode=mode,
             heavy_modes=self._heavy_modes,
         )
+        self._last_selected_model_config = config
         return config.name
+
+    # ------------------------------------------------------------------
+    # Context window guard
+    # ------------------------------------------------------------------
+
+    def _has_sufficient_context(self, messages: list[dict[str, Any]]) -> bool:
+        """Return True if there is enough context headroom to call the LLM."""
+        from roshni.core.llm.token_management import estimate_token_count, get_model_context_limit
+
+        total_text = " ".join(m.get("content", "") for m in messages if m.get("content"))
+        total_tokens = estimate_token_count(total_text)
+        context_limit = get_model_context_limit(self._llm.model, self._llm.provider)
+        return total_tokens <= context_limit - self._min_context_tokens
+
+    # ------------------------------------------------------------------
+    # Pre-compaction archival
+    # ------------------------------------------------------------------
+
+    def _archive_conversation(self, messages: list[dict[str, Any]]) -> None:
+        """Write *messages* to a markdown file in the archive directory (fire-and-forget)."""
+        if not self._archive_dir:
+            return
+        try:
+            from datetime import datetime
+
+            archive_path = Path(self._archive_dir)
+            archive_path.mkdir(parents=True, exist_ok=True)
+            session_id = self._active_session_id or "nosession"
+            filename = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{session_id[:8]}.md"
+            lines: list[str] = []
+            for msg in messages:
+                role = msg.get("role", "unknown")
+                content = msg.get("content", "")
+                lines.append(f"## {role}\n{content}\n")
+            (archive_path / filename).write_text("\n".join(lines), encoding="utf-8")
+            logger.debug(f"Archived {len(messages)} messages to {filename}")
+        except Exception as e:
+            logger.warning(f"Failed to archive conversation: {e}")
 
     # ------------------------------------------------------------------
     # Context compression
@@ -635,8 +771,11 @@ class DefaultAgent(BaseAgent):
 
         logger.info(f"Compressing history: {total_tokens} tokens / {context_limit} limit")
 
-        # Extract standing instructions from old messages
+        # Archive old messages before compacting
         old_messages = history[:-4]
+        self._archive_conversation(old_messages)
+
+        # Extract standing instructions from old messages
         standing: list[str] = []
         for msg in old_messages:
             content = msg.get("content", "")
@@ -670,8 +809,10 @@ class DefaultAgent(BaseAgent):
         if not text_parts:
             return ""
 
+        system_content = self._persona_prompt_minimal or "You are a helpful assistant."
+        summarize_instruction = "Summarize this conversation in 2-3 sentences. Be concise."
         prompt_messages = [
-            {"role": "system", "content": "Summarize this conversation in 2-3 sentences. Be concise."},
+            {"role": "system", "content": f"{system_content}\n\n{summarize_instruction}"},
             {"role": "user", "content": "\n".join(text_parts)},
         ]
         try:

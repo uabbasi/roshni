@@ -27,4 +27,9 @@ def get_agents_template() -> str:
     return _read_template("agents_template.md")
 
 
+def get_tools_template() -> str:
+    """Get the tools environment context template."""
+    return _read_template("tools_template.md")
+
+
 AVAILABLE_TONES = ["friendly", "professional", "warm", "witty"]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import threading
+from datetime import date
 
 import pytest
 
@@ -115,6 +116,51 @@ class TestMemoryManager:
         deep_path = os.path.join(tmp_dir, "a", "b", "c", "MEMORY.md")
         MemoryManager(deep_path)
         assert os.path.exists(deep_path)
+
+
+class TestDailyNotes:
+    def test_append_daily_note(self, manager, memory_path):
+        result = manager.append_daily_note("Had a good meeting")
+        assert "Noted" in result
+        daily_path = os.path.join(os.path.dirname(memory_path), "memory", date.today().isoformat() + ".md")
+        assert os.path.exists(daily_path)
+        text = open(daily_path).read()
+        assert "- Had a good meeting" in text
+
+    def test_append_multiple_notes(self, manager):
+        manager.append_daily_note("First note")
+        manager.append_daily_note("Second note")
+        ctx = manager.get_daily_context()
+        assert "First note" in ctx
+        assert "Second note" in ctx
+
+    def test_daily_note_specific_day(self, manager, memory_path):
+        day = date(2025, 1, 15)
+        manager.append_daily_note("Past note", day=day)
+        daily_path = os.path.join(os.path.dirname(memory_path), "memory", "2025-01-15.md")
+        assert os.path.exists(daily_path)
+
+    def test_get_daily_context_empty(self, manager):
+        ctx = manager.get_daily_context()
+        assert ctx == ""
+
+    def test_get_daily_context_with_data(self, manager):
+        manager.append_daily_note("Something happened")
+        ctx = manager.get_daily_context()
+        assert "[DAILY NOTES]" in ctx
+        assert "Something happened" in ctx
+        assert "[/DAILY NOTES]" in ctx
+
+    def test_daily_note_empty_content(self, manager):
+        result = manager.append_daily_note("   ")
+        assert "Error" in result
+
+    def test_daily_note_creates_directory(self, tmp_dir):
+        deep_path = os.path.join(tmp_dir, "deep", "MEMORY.md")
+        mgr = MemoryManager(deep_path)
+        mgr.append_daily_note("A note")
+        daily_dir = os.path.join(tmp_dir, "deep", "memory")
+        assert os.path.isdir(daily_dir)
 
 
 class TestSaveMemoryTool:

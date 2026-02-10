@@ -1,13 +1,17 @@
 """Memory system — persistent, file-backed agent memory.
 
 Provides a MemoryManager that reads/writes a MEMORY.md file organised into
-sections, and a factory to expose it as a tool the LLM can call directly.
+sections, plus daily session notes in a ``memory/`` subdirectory. The daily
+notes provide a raw chronological log alongside the curated MEMORY.md.
+
+A factory is included to expose memory as a tool the LLM can call directly.
 """
 
 from __future__ import annotations
 
 import re
 import threading
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -80,6 +84,56 @@ class MemoryManager:
 
         logger.debug(f"Memory saved to [{section}]: {content[:60]}...")
         return f"Saved to {section}: {content[:80]}"
+
+    # ------------------------------------------------------------------
+    # Daily notes
+    # ------------------------------------------------------------------
+
+    @property
+    def _daily_dir(self) -> Path:
+        """Directory for daily session notes, sibling to MEMORY.md."""
+        return self._path.parent / "memory"
+
+    def _daily_path(self, day: date | None = None) -> Path:
+        day = day or date.today()
+        return self._daily_dir / f"{day.isoformat()}.md"
+
+    def append_daily_note(self, note: str, *, day: date | None = None) -> str:
+        """Append a timestamped line to today's daily note file.
+
+        Creates the ``memory/`` directory and ``YYYY-MM-DD.md`` file on first use.
+
+        Returns:
+            Confirmation string.
+        """
+        note = note.strip()
+        if not note:
+            return "Error: empty note"
+
+        path = self._daily_path(day)
+        with self._lock:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if not path.exists():
+                path.write_text(f"# {(day or date.today()).isoformat()}\n\n", encoding="utf-8")
+            with path.open("a", encoding="utf-8") as f:
+                f.write(f"- {note}\n")
+
+        logger.debug(f"Daily note appended: {note[:60]}...")
+        return f"Noted: {note[:80]}"
+
+    def get_daily_context(self, *, day: date | None = None) -> str:
+        """Return today's daily notes for system prompt injection."""
+        path = self._daily_path(day)
+        if not path.exists():
+            return ""
+        text = path.read_text(encoding="utf-8").strip()
+        if not text:
+            return ""
+        return f"[DAILY NOTES]\n{text}\n[/DAILY NOTES]"
+
+    # ------------------------------------------------------------------
+    # Context & triggers
+    # ------------------------------------------------------------------
 
     def get_context(self, query: str | None = None) -> str:
         """Return the full memory file contents for system prompt injection."""

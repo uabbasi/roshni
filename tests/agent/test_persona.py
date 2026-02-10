@@ -2,7 +2,7 @@
 
 import pytest
 
-from roshni.agent.persona import extract_section, get_system_prompt
+from roshni.agent.persona import PromptMode, extract_section, get_system_prompt
 
 
 @pytest.fixture
@@ -17,6 +17,7 @@ def config_dir(tmp_path):
     (tmp_path / "SOUL.md").write_text("Be kind and curious.")
     (tmp_path / "USER.md").write_text("The user is a software engineer.")
     (tmp_path / "AGENTS.md").write_text("Delegate health questions to Averroes.")
+    (tmp_path / "TOOLS.md").write_text("The send_email tool sends from user@example.com.")
     return tmp_path
 
 
@@ -87,6 +88,27 @@ class TestGetSystemPrompt:
         empty_dir.mkdir()
         prompt = get_system_prompt(empty_dir, include_timestamp=False)
         assert prompt == ""
+
+    def test_tools_included_in_full(self, config_dir):
+        prompt = get_system_prompt(config_dir, include_timestamp=False)
+        assert "send_email tool sends from" in prompt
+
+    def test_tools_included_in_compact(self, config_dir):
+        prompt = get_system_prompt(config_dir, mode=PromptMode.COMPACT, include_timestamp=False)
+        assert "send_email tool sends from" in prompt
+
+    def test_tools_excluded_in_minimal(self, config_dir):
+        prompt = get_system_prompt(config_dir, mode=PromptMode.MINIMAL, include_timestamp=False)
+        assert "send_email" not in prompt
+
+    def test_tools_exclude_flag(self, config_dir):
+        prompt = get_system_prompt(config_dir, include_tools=False, include_timestamp=False)
+        assert "send_email" not in prompt
+
+    def test_tools_missing_file(self, tmp_path):
+        (tmp_path / "IDENTITY.md").write_text("You are a bot.")
+        prompt = get_system_prompt(tmp_path, include_timestamp=False)
+        assert "You are a bot" in prompt  # still works without TOOLS.md
 
     def test_custom_filenames(self, tmp_path):
         (tmp_path / "persona.md").write_text("Custom persona content")
