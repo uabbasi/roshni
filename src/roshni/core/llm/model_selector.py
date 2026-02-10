@@ -11,7 +11,7 @@ import os
 
 from loguru import logger
 
-from .config import MODEL_CATALOG, ModelConfig
+from .config import MODEL_CATALOG, THINKING_BUDGET_MAP, ModelConfig, ThinkingLevel
 
 # Keywords that suggest a query needs a heavier model.
 _COMPLEX_KEYWORDS: set[str] = {
@@ -76,20 +76,38 @@ class ModelSelector:
         mode: str | None = None,
         heavy_modes: set[str] | None = None,
         think: bool = False,
+        thinking_level: ThinkingLevel = ThinkingLevel.OFF,
     ) -> ModelConfig:
         """Single entry point for model selection.
 
         Priority:
-        1. think=True -> thinking model
+        1. think=True or thinking_level > OFF -> thinking model
         2. mode in heavy_modes -> heavy model
         3. Query length > 150 or complex keywords -> heavy model
         4. mode in light modes -> light model
         5. Light keywords -> light model
         6. Default -> light model
+
+        When *thinking_level* is provided and a thinking model is selected,
+        ``selected_config.thinking_budget_tokens`` is set based on the level.
         """
-        if think:
-            logger.debug(f"think=True -> thinking model: {self.thinking_model.display_name}")
-            return self.thinking_model
+        if think or thinking_level > ThinkingLevel.OFF:
+            logger.debug(f"thinking requested -> thinking model: {self.thinking_model.display_name}")
+            # Return a copy with thinking_budget_tokens set
+            budget = THINKING_BUDGET_MAP.get(
+                thinking_level if thinking_level > ThinkingLevel.OFF else ThinkingLevel.MEDIUM,
+                4096,
+            )
+            return ModelConfig(
+                name=self.thinking_model.name,
+                display_name=self.thinking_model.display_name,
+                provider=self.thinking_model.provider,
+                is_heavy=self.thinking_model.is_heavy,
+                is_thinking=self.thinking_model.is_thinking,
+                max_tokens=self.thinking_model.max_tokens,
+                cost_tier=self.thinking_model.cost_tier,
+                thinking_budget_tokens=budget,
+            )
 
         if mode:
             if heavy_modes and mode in heavy_modes:

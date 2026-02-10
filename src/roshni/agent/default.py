@@ -68,6 +68,21 @@ class DefaultAgent(BaseAgent):
     executes tools in a loop.
     """
 
+    @staticmethod
+    def _extract_text(content: Any) -> str:
+        """Extract plain text from message content (handles str and cache block lists)."""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if isinstance(block, str):
+                    parts.append(block)
+                elif isinstance(block, dict):
+                    parts.append(block.get("text", ""))
+            return " ".join(parts)
+        return str(content) if content else ""
+
     def __init__(
         self,
         config: Config,
@@ -714,7 +729,7 @@ class DefaultAgent(BaseAgent):
         """Return True if there is enough context headroom to call the LLM."""
         from roshni.core.llm.token_management import estimate_token_count, get_model_context_limit
 
-        total_text = " ".join(m.get("content", "") for m in messages if m.get("content"))
+        total_text = " ".join(self._extract_text(m.get("content", "")) for m in messages if m.get("content"))
         total_tokens = estimate_token_count(total_text)
         context_limit = get_model_context_limit(self._llm.model, self._llm.provider)
         return total_tokens <= context_limit - self._min_context_tokens
@@ -762,7 +777,7 @@ class DefaultAgent(BaseAgent):
             return
 
         # Estimate total tokens in history
-        total_text = " ".join(m.get("content", "") for m in history if m.get("content"))
+        total_text = " ".join(self._extract_text(m.get("content", "")) for m in history if m.get("content"))
         total_tokens = estimate_token_count(total_text)
         context_limit = get_model_context_limit(self._llm.model, self._llm.provider)
 
@@ -831,7 +846,9 @@ class DefaultAgent(BaseAgent):
         """Return True if current history is within *threshold* of context limit."""
         from roshni.core.llm.token_management import estimate_token_count, get_model_context_limit
 
-        total_text = " ".join(m.get("content", "") for m in self.message_history if m.get("content"))
+        total_text = " ".join(
+            self._extract_text(m.get("content", "")) for m in self.message_history if m.get("content")
+        )
         total_tokens = estimate_token_count(total_text)
         context_limit = get_model_context_limit(self._llm.model, self._llm.provider)
         return total_tokens < context_limit * threshold

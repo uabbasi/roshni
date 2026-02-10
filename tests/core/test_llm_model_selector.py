@@ -69,7 +69,7 @@ class TestSelect:
     def test_think_flag_returns_thinking_model(self):
         ms = ModelSelector(settings_path="/tmp/nonexistent_roshni_test.json")
         result = ms.select("anything", think=True)
-        assert result == ms.thinking_model
+        assert result.name == ms.thinking_model.name
 
     def test_heavy_mode_override(self):
         ms = ModelSelector(settings_path="/tmp/nonexistent_roshni_test.json")
@@ -105,7 +105,7 @@ class TestSelect:
     def test_think_takes_priority_over_mode(self):
         ms = ModelSelector(settings_path="/tmp/nonexistent_roshni_test.json")
         result = ms.select("anything", mode="summary", think=True)
-        assert result == ms.thinking_model
+        assert result.name == ms.thinking_model.name
 
     def test_all_complex_keywords_trigger_heavy(self):
         ms = ModelSelector(settings_path="/tmp/nonexistent_roshni_test.json")

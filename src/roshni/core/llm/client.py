@@ -39,6 +39,7 @@ class LLMClient:
         num_retries: int = 2,
         fallback_model: str | None = None,
         fallback_provider: str | None = None,
+        auth_profiles: list[Any] | None = None,
     ):
         # Resolve model ─ accept either (model=) or (provider=) style
         if model:
@@ -60,6 +61,13 @@ class LLMClient:
         # Fallback configuration
         self.fallback_model = fallback_model
         self.fallback_provider = fallback_provider or (infer_provider(fallback_model) if fallback_model else None)
+
+        # Auth profile rotation
+        self._auth_profile_manager = None
+        if auth_profiles:
+            from .auth_profiles import AuthProfileManager
+
+            self._auth_profile_manager = AuthProfileManager(auth_profiles)
 
         # Resolve max_tokens
         model_limit = get_model_max_tokens(self.model, self.provider)
@@ -92,6 +100,7 @@ class LLMClient:
         tools: list[dict[str, Any]] | None = None,
         stop: list[str] | None = None,
         model: str | None = None,
+        thinking: dict[str, Any] | None = None,
     ) -> Any:
         """Low-level completion call with budget checking, usage recording, and fallback.
 
@@ -107,6 +116,8 @@ class LLMClient:
             stop: Optional stop sequences.
             model: Optional per-request model override. When provided,
                 uses this model instead of ``self.model`` for this single call.
+            thinking: Optional thinking config, e.g.
+                ``{"type": "enabled", "budget_tokens": 4096}``.
 
         Returns:
             The raw litellm response object.
@@ -121,13 +132,45 @@ class LLMClient:
             raise ImportError("Install LLM support with: pip install roshni[llm]")
 
         self._check_budget()
-        kwargs = self._build_completion_kwargs(messages, tools=tools, stop=stop, model=model)
+        kwargs = self._build_completion_kwargs(messages, tools=tools, stop=stop, model=model, thinking=thinking)
+
+        _BadRequestError = getattr(litellm, "BadRequestError", None)
 
         try:
             response = litellm.completion(**kwargs)
             self._record_response_usage(response)
             return response
-        except (litellm.RateLimitError, litellm.APIError, litellm.APIConnectionError) as e:
+        except Exception as e:
+            # Thinking not supported by this model — retry without it
+            if _BadRequestError and isinstance(e, _BadRequestError):
+                if thinking and "thinking" in str(e).lower():
+                    logger.warning(f"Thinking not supported by {kwargs.get('model')}, retrying without")
+                    kwargs.pop("thinking", None)
+                    response = litellm.completion(**kwargs)
+                    self._record_response_usage(response)
+                    return response
+                raise
+
+            if not isinstance(e, (litellm.RateLimitError, litellm.APIError, litellm.APIConnectionError)):
+                raise
+
+            # Try auth profile rotation before falling back to a different model
+            if self._auth_profile_manager:
+                active = self._auth_profile_manager.get_active()
+                if active:
+                    self._auth_profile_manager.mark_failed(active.name)
+                next_profile = self._auth_profile_manager.rotate()
+                if next_profile:
+                    kwargs["api_key"] = next_profile.api_key
+                    if next_profile.model:
+                        kwargs["model"] = next_profile.model
+                    try:
+                        response = litellm.completion(**kwargs)
+                        self._auth_profile_manager.mark_success(next_profile.name)
+                        self._record_response_usage(response)
+                        return response
+                    except (litellm.RateLimitError, litellm.APIError, litellm.APIConnectionError):
+                        self._auth_profile_manager.mark_failed(next_profile.name)
             if self.fallback_model:
                 return self._fallback_completion(kwargs, e, is_async=False)
             raise
@@ -139,6 +182,7 @@ class LLMClient:
         tools: list[dict[str, Any]] | None = None,
         stop: list[str] | None = None,
         model: str | None = None,
+        thinking: dict[str, Any] | None = None,
     ) -> Any:
         """Async version of completion() with fallback support."""
         try:
@@ -147,13 +191,43 @@ class LLMClient:
             raise ImportError("Install LLM support with: pip install roshni[llm]")
 
         self._check_budget()
-        kwargs = self._build_completion_kwargs(messages, tools=tools, stop=stop, model=model)
+        kwargs = self._build_completion_kwargs(messages, tools=tools, stop=stop, model=model, thinking=thinking)
+
+        _BadRequestError = getattr(litellm, "BadRequestError", None)
 
         try:
             response = await litellm.acompletion(**kwargs)
             self._record_response_usage(response)
             return response
-        except (litellm.RateLimitError, litellm.APIError, litellm.APIConnectionError) as e:
+        except Exception as e:
+            if _BadRequestError and isinstance(e, _BadRequestError):
+                if thinking and "thinking" in str(e).lower():
+                    logger.warning(f"Thinking not supported by {kwargs.get('model')}, retrying without")
+                    kwargs.pop("thinking", None)
+                    response = await litellm.acompletion(**kwargs)
+                    self._record_response_usage(response)
+                    return response
+                raise
+
+            if not isinstance(e, (litellm.RateLimitError, litellm.APIError, litellm.APIConnectionError)):
+                raise
+
+            if self._auth_profile_manager:
+                active = self._auth_profile_manager.get_active()
+                if active:
+                    self._auth_profile_manager.mark_failed(active.name)
+                next_profile = self._auth_profile_manager.rotate()
+                if next_profile:
+                    kwargs["api_key"] = next_profile.api_key
+                    if next_profile.model:
+                        kwargs["model"] = next_profile.model
+                    try:
+                        response = await litellm.acompletion(**kwargs)
+                        self._auth_profile_manager.mark_success(next_profile.name)
+                        self._record_response_usage(response)
+                        return response
+                    except (litellm.RateLimitError, litellm.APIError, litellm.APIConnectionError):
+                        self._auth_profile_manager.mark_failed(next_profile.name)
             if self.fallback_model:
                 return await self._fallback_completion(kwargs, e, is_async=True)
             raise
@@ -258,8 +332,15 @@ class LLMClient:
         model: str | None = None,
         extra_headers: dict[str, str] | None = None,
         extra_body: dict[str, Any] | None = None,
+        thinking: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Build kwargs dict for litellm.completion / acompletion."""
+        """Build kwargs dict for litellm.completion / acompletion.
+
+        Args:
+            thinking: Optional thinking config, e.g.
+                ``{"type": "enabled", "budget_tokens": 4096}``.
+                Passed through to litellm for models that support extended thinking.
+        """
         effective_model = model or self.model
         max_tokens = self.max_tokens
         if model and model != self.model:
@@ -281,6 +362,8 @@ class LLMClient:
             kwargs["extra_headers"] = extra_headers
         if extra_body:
             kwargs["extra_body"] = extra_body
+        if thinking:
+            kwargs["thinking"] = thinking
         return kwargs
 
     def _fallback_completion(self, kwargs: dict[str, Any], original_error: Exception, *, is_async: bool) -> Any:

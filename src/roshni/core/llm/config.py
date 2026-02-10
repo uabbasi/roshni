@@ -6,6 +6,7 @@ to affect every module that uses roshni's LLM client.
 """
 
 from dataclasses import dataclass
+from enum import IntEnum
 
 # --- Default model names per provider ---
 
@@ -82,6 +83,23 @@ PROVIDER_DEFAULT_LIMITS: dict[str, int] = {
 }
 
 
+class ThinkingLevel(IntEnum):
+    """Gradation for extended thinking / reasoning budgets."""
+
+    OFF = 0
+    LOW = 1  # 1024 tokens
+    MEDIUM = 2  # 4096 tokens
+    HIGH = 3  # 16384 tokens
+
+
+THINKING_BUDGET_MAP: dict[ThinkingLevel, int] = {
+    ThinkingLevel.OFF: 0,
+    ThinkingLevel.LOW: 1024,
+    ThinkingLevel.MEDIUM: 4096,
+    ThinkingLevel.HIGH: 16384,
+}
+
+
 @dataclass
 class ModelConfig:
     """Configuration for a specific model."""
@@ -93,6 +111,7 @@ class ModelConfig:
     is_thinking: bool = False
     max_tokens: int | None = None
     cost_tier: str = "medium"  # low, medium, high, free
+    thinking_budget_tokens: int | None = None
 
 
 # Model catalog with light, heavy, and thinking options per provider.
