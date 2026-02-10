@@ -25,6 +25,7 @@ dependencies = [
     "click>=8.0",
     "rich>=13.0",
     "questionary>=2.0",
+    "pydantic>=2.0",
     # LLM
     "litellm>=1.60",
     "tenacity>=8.0",

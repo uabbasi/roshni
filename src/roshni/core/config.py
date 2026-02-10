@@ -23,9 +23,14 @@ Usage:
     config.get("paths.data_dir")     # returns resolved path
 """
 
+from __future__ import annotations
+
 import json
 import os
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from roshni.core.config_schema import RoshniConfig
 
 import yaml
 
@@ -168,6 +173,16 @@ class Config:
             if isinstance(path_value, str):
                 expanded = os.path.expanduser(path_value)
                 os.makedirs(expanded, exist_ok=True)
+
+    def validated(self) -> RoshniConfig:
+        """Parse and validate config_data against the Pydantic schema.
+
+        Returns a validated RoshniConfig instance. This is opt-in —
+        existing code continues to work without validation.
+        """
+        from roshni.core.config_schema import RoshniConfig
+
+        return RoshniConfig.model_validate(self.config_data)
 
 
 # Module-level singleton

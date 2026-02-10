@@ -1,0 +1,183 @@
+"""Session persistence — append-only JSONL storage for agent conversations.
+
+Tracks conversation turns (user/assistant messages) with metadata and
+provides a simple file-based store for session history.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import uuid
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, Protocol, runtime_checkable
+
+
+def _now_iso() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+@dataclass
+class Turn:
+    """A single conversational turn."""
+
+    role: str
+    content: str
+    timestamp: str = field(default_factory=_now_iso)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class Session:
+    """An agent conversation session."""
+
+    id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
+    agent_name: str = ""
+    channel: str = ""
+    started: str = field(default_factory=_now_iso)
+    ended: str | None = None
+    turns: list[Turn] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@runtime_checkable
+class SessionStore(Protocol):
+    """Storage backend for agent sessions."""
+
+    def save_turn(self, session_id: str, turn: Turn) -> None: ...
+
+    def create_session(self, session: Session) -> None: ...
+
+    def load_session(self, session_id: str) -> Session | None: ...
+
+    def list_sessions(
+        self,
+        *,
+        agent_name: str | None = None,
+        channel: str | None = None,
+        since: str | None = None,
+        limit: int = 50,
+    ) -> list[Session]: ...
+
+    def close_session(self, session_id: str) -> None: ...
+
+
+class JSONLSessionStore:
+    """Append-only JSONL file store for sessions.
+
+    Layout::
+
+        base_dir/
+            _sessions.jsonl     # index — one JSON line per session (no turns)
+            {session_id}.jsonl  # per-session file — header + turns
+    """
+
+    _INDEX = "_sessions.jsonl"
+
+    def __init__(self, base_dir: str | Path) -> None:
+        self._base = Path(base_dir)
+        os.makedirs(self._base, exist_ok=True)
+
+    # -- public API ----------------------------------------------------------
+
+    def create_session(self, session: Session) -> None:
+        header = self._session_header(session)
+        self._append(self._index_path, header)
+        self._append(self._session_path(session.id), header)
+
+    def save_turn(self, session_id: str, turn: Turn) -> None:
+        self._append(self._session_path(session_id), asdict(turn))
+
+    def load_session(self, session_id: str) -> Session | None:
+        path = self._session_path(session_id)
+        if not path.exists():
+            return None
+        lines = self._read_lines(path)
+        if not lines:
+            return None
+        header = lines[0]
+        turns = [Turn(**line) for line in lines[1:]]
+        return Session(**header, turns=turns)
+
+    def list_sessions(
+        self,
+        *,
+        agent_name: str | None = None,
+        channel: str | None = None,
+        since: str | None = None,
+        limit: int = 50,
+    ) -> list[Session]:
+        if not self._index_path.exists():
+            return []
+        entries = self._read_lines(self._index_path)
+        if agent_name is not None:
+            entries = [e for e in entries if e.get("agent_name") == agent_name]
+        if channel is not None:
+            entries = [e for e in entries if e.get("channel") == channel]
+        if since is not None:
+            entries = [e for e in entries if e.get("started", "") >= since]
+        sessions = [Session(**e) for e in entries[-limit:]]
+        return sessions
+
+    def close_session(self, session_id: str) -> None:
+        session = self.load_session(session_id)
+        if session is None:
+            return
+        session.ended = _now_iso()
+
+        # Rewrite session file with updated header
+        path = self._session_path(session_id)
+        header = self._session_header(session)
+        lines = self._read_lines(path)
+        lines[0] = header
+        self._write_lines(path, lines)
+
+        # Update index entry
+        idx_path = self._index_path
+        if idx_path.exists():
+            idx_lines = self._read_lines(idx_path)
+            for i, entry in enumerate(idx_lines):
+                if entry.get("id") == session_id:
+                    entry["ended"] = session.ended
+                    idx_lines[i] = entry
+                    break
+            self._write_lines(idx_path, idx_lines)
+
+    # -- internal helpers ----------------------------------------------------
+
+    @property
+    def _index_path(self) -> Path:
+        return self._base / self._INDEX
+
+    def _session_path(self, session_id: str) -> Path:
+        return self._base / f"{session_id}.jsonl"
+
+    @staticmethod
+    def _session_header(session: Session) -> dict[str, Any]:
+        """Session metadata dict (without turns)."""
+        d = asdict(session)
+        d.pop("turns", None)
+        return d
+
+    @staticmethod
+    def _append(path: Path, data: dict[str, Any]) -> None:
+        with open(path, "a") as f:
+            f.write(json.dumps(data, ensure_ascii=False) + "\n")
+
+    @staticmethod
+    def _read_lines(path: Path) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    results.append(json.loads(line))
+        return results
+
+    @staticmethod
+    def _write_lines(path: Path, data: list[dict[str, Any]]) -> None:
+        with open(path, "w") as f:
+            for item in data:
+                f.write(json.dumps(item, ensure_ascii=False) + "\n")

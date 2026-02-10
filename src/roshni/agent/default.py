@@ -24,9 +24,19 @@ from roshni.agent.approval import ApprovalStore
 from roshni.agent.base import BaseAgent, ChatResult
 from roshni.agent.tools import ToolDefinition
 from roshni.core.config import Config
+from roshni.core.events import (
+    AGENT_CHAT_COMPLETE,
+    AGENT_CHAT_START,
+    AGENT_TOOL_CALLED,
+    AGENT_TOOL_RESULT,
+    Event,
+    EventBus,
+)
 from roshni.core.llm.client import LLMClient
 from roshni.core.llm.model_selector import ModelSelector
 from roshni.core.secrets import SecretsManager
+
+from .session import Session, SessionStore, Turn
 
 
 class DefaultAgent(BaseAgent):
@@ -56,6 +66,8 @@ class DefaultAgent(BaseAgent):
         enable_compression: bool = False,
         memory_path: str | None = None,
         on_chat_complete: Callable[[str, str, list[dict]], None] | None = None,
+        event_bus: EventBus | None = None,
+        session_store: SessionStore | None = None,
     ):
         super().__init__(name=name)
 
@@ -70,6 +82,9 @@ class DefaultAgent(BaseAgent):
         self._heavy_modes = heavy_modes or set()
         self._enable_compression = enable_compression
         self._on_chat_complete = on_chat_complete
+        self._event_bus = event_bus
+        self._session_store = session_store
+        self._active_session_id: str | None = None
 
         # Build system prompt
         if system_prompt:
@@ -124,6 +139,21 @@ class DefaultAgent(BaseAgent):
     def provider(self) -> str:
         return self._llm.provider
 
+    @property
+    def session_id(self) -> str | None:
+        """Current active session ID, if any."""
+        return self._active_session_id
+
+    def resume_session(self, session_id: str) -> None:
+        """Reload history from a stored session."""
+        if not self._session_store:
+            raise RuntimeError("No session_store configured")
+        session = self._session_store.load_session(session_id)
+        if session is None:
+            raise ValueError(f"Session {session_id!r} not found")
+        self._active_session_id = session_id
+        self.message_history = [{"role": t.role, "content": t.content} for t in session.turns]
+
     def chat(
         self,
         message: str,
@@ -147,6 +177,18 @@ class DefaultAgent(BaseAgent):
         tool_call_log: list[dict[str, Any]] = []
         max_followups = int(kwargs.get("max_followups", 3))
         clear_history = call_type in ("heartbeat", "scheduled")
+
+        # Session: lazily create on first chat()
+        if self._session_store and not self._active_session_id:
+            session = Session(agent_name=self.name, channel=channel or "")
+            self._session_store.create_session(session)
+            self._active_session_id = session.id
+
+        # Emit AGENT_CHAT_START
+        if self._event_bus:
+            self._event_bus.emit_sync(
+                Event(name=AGENT_CHAT_START, payload={"message": message, "channel": channel}, source=self.name)
+            )
 
         try:
             if self._pending_approval:
@@ -253,6 +295,35 @@ class DefaultAgent(BaseAgent):
                 if not save_memory_called:
                     self._fire_memory_extraction(message, selected_model)
 
+            # Emit AGENT_CHAT_COMPLETE
+            if self._event_bus:
+                self._event_bus.emit_sync(
+                    Event(
+                        name=AGENT_CHAT_COMPLETE,
+                        payload={"message": message, "response": final_text, "tool_calls": tool_call_log},
+                        source=self.name,
+                    )
+                )
+
+            # Persist session turns
+            if self._session_store and self._active_session_id:
+                self._session_store.save_turn(
+                    self._active_session_id,
+                    Turn(role="user", content=message, metadata={"channel": channel or ""}),
+                )
+                self._session_store.save_turn(
+                    self._active_session_id,
+                    Turn(
+                        role="assistant",
+                        content=final_text,
+                        metadata={
+                            "model": self.model,
+                            "duration": result.duration,
+                            "tools_called": [tc.get("name") for tc in tool_call_log],
+                        },
+                    ),
+                )
+
             return result
 
         except Exception as e:
@@ -345,6 +416,12 @@ class DefaultAgent(BaseAgent):
 
                 logger.debug(f"Tool call: {fn_name}({fn_args})")
 
+                # Emit AGENT_TOOL_CALLED
+                if self._event_bus:
+                    self._event_bus.emit_sync(
+                        Event(name=AGENT_TOOL_CALLED, payload={"tool": fn_name, "args": fn_args}, source=self.name)
+                    )
+
                 tool = tool_map.get(fn_name)
                 if tool:
                     if self._should_require_approval(tool, channel=channel):
@@ -368,6 +445,16 @@ class DefaultAgent(BaseAgent):
                     result = tool.execute(fn_args)
                 else:
                     result = f"Unknown tool: {fn_name}"
+
+                # Emit AGENT_TOOL_RESULT
+                if self._event_bus:
+                    self._event_bus.emit_sync(
+                        Event(
+                            name=AGENT_TOOL_RESULT,
+                            payload={"tool": fn_name, "result": result},
+                            source=self.name,
+                        )
+                    )
 
                 tool_call_log.append(
                     {
