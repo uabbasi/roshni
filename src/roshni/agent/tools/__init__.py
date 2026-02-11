@@ -58,20 +58,20 @@ class ToolDefinition:
 
     def to_litellm_schema(self) -> dict[str, Any]:
         """Convert to litellm/OpenAI function calling format."""
-        params = self.parameters
-        if params.get("type") == "object":
-            if "properties" not in params:
-                params = {**params, "properties": {}}
-            if "required" not in params:
-                params = {**params, "required": []}
-        return {
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": params,
-            },
+        func: dict[str, Any] = {
+            "name": self.name,
+            "description": self.description,
         }
+        params = self.parameters
+        # Omit parameters entirely for zero-arg tools — Gemini and OpenAI
+        # strict mode reject {"type": "object", "properties": {}}.
+        if params.get("type") == "object" and not params.get("properties"):
+            pass  # no parameters key
+        else:
+            if params.get("type") == "object" and "required" not in params:
+                params = {**params, "required": []}
+            func["parameters"] = params
+        return {"type": "function", "function": func}
 
     def needs_approval(self) -> bool:
         """Whether this tool must be user-approved before execution."""
