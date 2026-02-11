@@ -20,6 +20,7 @@ from typing import Any
 
 from loguru import logger
 
+from roshni.agent.advisor import Advisor, AfterChatHook
 from roshni.agent.approval import ApprovalStore
 from roshni.agent.base import BaseAgent, ChatResult
 from roshni.agent.tools import ToolDefinition
@@ -107,6 +108,9 @@ class DefaultAgent(BaseAgent):
         archive_dir: str | None = None,
         min_context_tokens: int = 4096,
         tool_policy: Any | None = None,
+        advisors: list[Advisor] | None = None,
+        after_chat_hooks: list[AfterChatHook] | None = None,
+        circuit_breaker: Any | None = None,
     ):
         super().__init__(name=name)
 
@@ -120,7 +124,6 @@ class DefaultAgent(BaseAgent):
         self._model_selector = model_selector
         self._heavy_modes = heavy_modes or set()
         self._enable_compression = enable_compression
-        self._on_chat_complete = on_chat_complete
         self._event_bus = event_bus
         self._session_store = session_store
         self._active_session_id: str | None = None
@@ -128,6 +131,10 @@ class DefaultAgent(BaseAgent):
         self._archive_dir = archive_dir
         self._min_context_tokens = min_context_tokens
         self._tool_policy = tool_policy
+
+        # Advisor and hook registries
+        self._advisors: list[Advisor] = list(advisors) if advisors else []
+        self._after_chat_hooks: list[AfterChatHook] = list(after_chat_hooks) if after_chat_hooks else []
 
         # Build system prompt
         if system_prompt:
@@ -179,6 +186,28 @@ class DefaultAgent(BaseAgent):
 
             self._memory_manager = MemoryManager(memory_path)
             self.tools.append(create_save_memory_tool(self._memory_manager))
+
+            # Auto-register memory advisor + extraction hook
+            from roshni.agent.advisors import MemoryAdvisor
+            from roshni.agent.hooks import MemoryExtractionHook
+
+            self._advisors.insert(0, MemoryAdvisor(self._memory_manager))
+            self._after_chat_hooks.append(MemoryExtractionHook(self._memory_manager, self._llm, self._model_selector))
+
+        # System health: wire CircuitBreaker into advisor + hook feedback loop
+        from roshni.agent.advisors import SystemHealthAdvisor
+        from roshni.agent.circuit_breaker import CircuitBreaker
+        from roshni.agent.hooks import MetricsHook
+
+        self._circuit_breaker = circuit_breaker if isinstance(circuit_breaker, CircuitBreaker) else CircuitBreaker()
+        self._advisors.append(SystemHealthAdvisor(circuit_breaker=self._circuit_breaker))
+        self._after_chat_hooks.append(MetricsHook(self._circuit_breaker))
+
+        # Backward compat: wrap on_chat_complete as a hook
+        if on_chat_complete:
+            from roshni.agent.hooks import LoggingHook
+
+            self._after_chat_hooks.append(LoggingHook(on_chat_complete))
 
         # Runtime context (injected into dynamic portion of system message)
         self._runtime_context = _build_runtime_context(
@@ -287,6 +316,7 @@ class DefaultAgent(BaseAgent):
                 selected_model=selected_model,
                 clear_history=clear_history,
                 channel=channel,
+                message=message,
             )
             if self._pending_approval:
                 # Approval bail — _run_tool_loop set _pending_approval
@@ -319,6 +349,7 @@ class DefaultAgent(BaseAgent):
                     clear_history=clear_history,
                     channel=channel,
                     prompt_mode="compact",
+                    message=followup_msg,
                 )
                 if self._pending_approval:
                     prompt = self._build_approval_prompt(
@@ -348,15 +379,8 @@ class DefaultAgent(BaseAgent):
                 model=self.model,
             )
 
-            # Fire logging hook (daemon thread — won't block response)
-            if self._on_chat_complete:
-                self._fire_chat_complete(message, final_text, tool_call_log)
-
-            # Fire memory auto-extraction if needed
-            if self._memory_manager and self._memory_manager.detect_trigger(message):
-                save_memory_called = any(tc.get("name") == "save_memory" for tc in tool_call_log)
-                if not save_memory_called:
-                    self._fire_memory_extraction(message, selected_model)
+            # Fire after-chat hooks (each in a daemon thread)
+            self._fire_after_chat_hooks(message, final_text, tool_call_log, channel)
 
             # Emit AGENT_CHAT_COMPLETE
             if self._event_bus:
@@ -432,6 +456,7 @@ class DefaultAgent(BaseAgent):
         clear_history: bool = False,
         channel: str | None = None,
         prompt_mode: str = "full",
+        message: str = "",
     ) -> None:
         """Execute LLM → tool calls → record results loop.
 
@@ -445,7 +470,9 @@ class DefaultAgent(BaseAgent):
             if steering:
                 self.message_history.append({"role": "user", "content": f"[STEERING] {steering}"})
 
-            messages = self._build_messages(mode=mode, clear_history=clear_history, prompt_mode=prompt_mode)
+            messages = self._build_messages(
+                mode=mode, clear_history=clear_history, prompt_mode=prompt_mode, message=message, channel=channel
+            )
 
             # Context window guard — stop loop if context is nearly full
             if not self._has_sufficient_context(messages):
@@ -574,8 +601,10 @@ class DefaultAgent(BaseAgent):
         mode: str | None = None,
         clear_history: bool = False,
         prompt_mode: str = "full",
+        message: str = "",
+        channel: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Build the messages list with system prompt, memory, and trimmed history.
+        """Build the messages list with system prompt, advisors, and trimmed history.
 
         Args:
             mode: Optional mode hint key.
@@ -583,6 +612,8 @@ class DefaultAgent(BaseAgent):
                 messages from the current turn to reduce token usage.
             prompt_mode: One of ``"full"``, ``"compact"``, ``"minimal"``.
                 Controls which persona prompt variant to use.
+            message: Current user message (passed to advisors).
+            channel: Current channel (passed to advisors).
         """
         from roshni.core.llm.caching import build_cached_system_message
 
@@ -598,15 +629,15 @@ class DefaultAgent(BaseAgent):
 
         if persona:
             # Stable portion: persona (changes rarely, cacheable)
-            # Dynamic portion: memory + daily notes + runtime + mode hints (changes per call)
+            # Dynamic portion: advisors + runtime + mode hints (changes per call)
             dynamic_parts: list[str] = []
-            if self._memory_manager:
-                mem_ctx = self._memory_manager.get_context()
-                if mem_ctx:
-                    dynamic_parts.append(mem_ctx)
-                daily_ctx = self._memory_manager.get_daily_context()
-                if daily_ctx:
-                    dynamic_parts.append(daily_ctx)
+            for advisor in self._advisors:
+                try:
+                    ctx = advisor.advise(message=message, channel=channel)
+                    if ctx:
+                        dynamic_parts.append(ctx)
+                except Exception as e:
+                    logger.warning(f"Advisor '{advisor.name}' failed: {e}")
             if self._runtime_context:
                 dynamic_parts.append(self._runtime_context)
             if mode and mode in self._mode_hints:
@@ -683,9 +714,16 @@ class DefaultAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     def _extract_final_text(self) -> str:
-        """Walk history backward to find the last assistant text."""
+        """Walk history backward to find the last assistant text.
+
+        Skips assistant messages that carry tool_calls — those contain
+        internal tool-calling syntax (e.g. Gemini's ``call:default_api:...``),
+        not user-facing prose.
+        """
         for msg in reversed(self.message_history):
             if msg.get("role") == "assistant" and msg.get("content"):
+                if msg.get("tool_calls"):
+                    continue
                 return str(msg["content"])
         return ""
 
@@ -854,61 +892,38 @@ class DefaultAgent(BaseAgent):
         return total_tokens < context_limit * threshold
 
     # ------------------------------------------------------------------
-    # Logging hook
+    # After-chat hooks
     # ------------------------------------------------------------------
 
-    def _fire_chat_complete(self, user_msg: str, response: str, tool_calls: list[dict]) -> None:
-        """Fire on_chat_complete in a daemon thread (fire-and-forget)."""
+    def _fire_after_chat_hooks(
+        self,
+        message: str,
+        response: str,
+        tool_calls: list[dict[str, Any]],
+        channel: str | None = None,
+    ) -> None:
+        """Run each AfterChatHook in a daemon thread (fire-and-forget)."""
+        for hook in self._after_chat_hooks:
 
-        def _run() -> None:
-            try:
-                self._on_chat_complete(user_msg, response, tool_calls)  # type: ignore[misc]
-            except Exception as e:
-                logger.warning(f"on_chat_complete hook failed: {e}")
+            def _run(h: AfterChatHook = hook) -> None:
+                try:
+                    h.run(message=message, response=response, tool_calls=tool_calls, channel=channel)
+                except Exception as e:
+                    logger.warning(f"AfterChatHook '{h.name}' failed: {e}")
 
-        t = threading.Thread(target=_run, daemon=True)
-        t.start()
+            threading.Thread(target=_run, daemon=True).start()
 
     # ------------------------------------------------------------------
-    # Memory auto-extraction
+    # Advisor / hook registration
     # ------------------------------------------------------------------
 
-    def _fire_memory_extraction(self, user_message: str, selected_model: str | None) -> None:
-        """Background daemon thread: extract and save a standing instruction."""
+    def add_advisor(self, advisor: Advisor) -> None:
+        """Register an advisor for pre-chat context injection."""
+        self._advisors.append(advisor)
 
-        def _run() -> None:
-            try:
-                prompt_messages = [
-                    {
-                        "role": "system",
-                        "content": (
-                            "Extract the standing instruction or preference from the following message. "
-                            "Reply with ONLY the extracted instruction, nothing else. "
-                            "If there is no clear instruction, reply with exactly: NONE"
-                        ),
-                    },
-                    {"role": "user", "content": user_message},
-                ]
-                light_model = self._model_selector.light_model.name if self._model_selector else None
-                model = light_model or selected_model
-                response = self._llm.completion(prompt_messages, model=model)
-                extracted = (response.choices[0].message.content or "").strip()
-                if not extracted or extracted.upper() == "NONE":
-                    return
-
-                # Determine section
-                msg_lower = user_message.lower()
-                if any(kw in msg_lower for kw in ("always", "never", "prefer", "like", "hate")):
-                    section = "preferences"
-                else:
-                    section = "decisions"
-
-                self._memory_manager.save(section, extracted)  # type: ignore[union-attr]
-            except Exception as e:
-                logger.debug(f"Memory auto-extraction failed (non-fatal): {e}")
-
-        t = threading.Thread(target=_run, daemon=True)
-        t.start()
+    def add_after_chat_hook(self, hook: AfterChatHook) -> None:
+        """Register a hook for post-chat side-effects."""
+        self._after_chat_hooks.append(hook)
 
     # ------------------------------------------------------------------
     # History management

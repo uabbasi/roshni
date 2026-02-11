@@ -4,6 +4,8 @@
 from roshni.core.events import EventBus
 from roshni.core.llm.model_selector import ModelSelector
 
+from .advisor import Advisor, AfterChatHook, FunctionAdvisor, FunctionAfterChatHook
+from .advisors import MemoryAdvisor, SystemHealthAdvisor
 from .base import BaseAgent, ChatResult
 from .circuit_breaker import CircuitBreaker, CircuitBreakerConfig
 from .default import DefaultAgent
@@ -13,6 +15,8 @@ from .router import CommandParseResult, Router, RouteResult
 from .session import JSONLSessionStore, Session, SessionStore, Turn
 
 __all__ = [
+    "Advisor",
+    "AfterChatHook",
     "BaseAgent",
     "ChatResult",
     "CircuitBreaker",
@@ -20,13 +24,17 @@ __all__ = [
     "CommandParseResult",
     "DefaultAgent",
     "EventBus",
+    "FunctionAdvisor",
+    "FunctionAfterChatHook",
     "JSONLSessionStore",
+    "MemoryAdvisor",
     "MemoryManager",
     "ModelSelector",
     "RouteResult",
     "Router",
     "Session",
     "SessionStore",
+    "SystemHealthAdvisor",
     "Turn",
     "get_system_prompt",
 ]

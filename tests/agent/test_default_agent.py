@@ -602,7 +602,11 @@ class TestDefaultAgentBuildMessages:
         agent.message_history.append({"role": "user", "content": "hi"})
         messages = agent._build_messages()
         assert messages[0]["role"] == "system"
-        assert messages[0]["content"] == "Be helpful."
+        # System content includes persona + dynamic parts (runtime context, advisors)
+        content = messages[0]["content"]
+        if isinstance(content, list):
+            content = " ".join(b.get("text", "") if isinstance(b, dict) else str(b) for b in content)
+        assert "Be helpful." in content
         assert messages[1]["role"] == "user"
 
     def test_trims_long_history(self, config, secrets):
@@ -613,3 +617,122 @@ class TestDefaultAgentBuildMessages:
         user_msgs = [m for m in messages if m["role"] == "user"]
         assert len(user_msgs) == 4
         assert user_msgs[0]["content"] == "msg 6"
+
+
+class TestAdvisorIntegration:
+    """Tests that advisors and hooks are wired into DefaultAgent correctly."""
+
+    @patch("roshni.core.llm.client.LLMClient.completion")
+    @patch("roshni.core.llm.token_budget.get_budget_pressure", return_value=0.0)
+    def test_custom_advisor_injected_into_system_prompt(self, _budget, mock_completion, config, secrets):
+        from roshni.agent.advisor import FunctionAdvisor
+
+        advisor = FunctionAdvisor("test_ctx", lambda: "[TEST] custom context here")
+        mock_completion.return_value = _make_response("ok")
+
+        agent = DefaultAgent(config=config, secrets=secrets, advisors=[advisor])
+        agent.chat("hi")
+
+        # Check that system prompt includes the advisor output
+        call_args = mock_completion.call_args
+        messages = call_args[0][0] if call_args[0] else call_args.kwargs.get("messages", [])
+        system_msg = messages[0]
+        system_content = system_msg.get("content", "")
+        if isinstance(system_content, list):
+            system_content = " ".join(
+                block.get("text", "") if isinstance(block, dict) else str(block) for block in system_content
+            )
+        assert "[TEST] custom context here" in system_content
+
+    @patch("roshni.core.llm.client.LLMClient.completion")
+    @patch("roshni.core.llm.token_budget.get_budget_pressure", return_value=0.0)
+    def test_after_chat_hook_fires(self, _budget, mock_completion, config, secrets):
+        import threading
+
+        from roshni.agent.advisor import FunctionAfterChatHook
+
+        mock_completion.return_value = _make_response("Done")
+        captured = {}
+        event = threading.Event()
+
+        def hook_fn(message, response):
+            captured["msg"] = message
+            captured["resp"] = response
+            event.set()
+
+        hook = FunctionAfterChatHook("test_hook", hook_fn)
+        agent = DefaultAgent(config=config, secrets=secrets, after_chat_hooks=[hook])
+        agent.chat("hello")
+
+        event.wait(timeout=2.0)
+        assert captured.get("msg") == "hello"
+        assert captured.get("resp") == "Done"
+
+    @patch("roshni.core.llm.client.LLMClient.completion")
+    @patch("roshni.core.llm.token_budget.get_budget_pressure", return_value=0.0)
+    def test_on_chat_complete_backward_compat(self, _budget, mock_completion, config, secrets):
+        import threading
+
+        mock_completion.return_value = _make_response("Yo")
+        captured = {}
+        event = threading.Event()
+
+        def callback(msg, resp, tools):
+            captured["msg"] = msg
+            event.set()
+
+        agent = DefaultAgent(config=config, secrets=secrets, on_chat_complete=callback)
+        agent.chat("test")
+
+        event.wait(timeout=2.0)
+        assert captured.get("msg") == "test"
+
+    @patch("roshni.core.llm.client.LLMClient.completion")
+    @patch("roshni.core.llm.token_budget.get_budget_pressure", return_value=0.0)
+    def test_add_advisor_dynamically(self, _budget, mock_completion, config, secrets):
+        from roshni.agent.advisor import FunctionAdvisor
+
+        mock_completion.return_value = _make_response("ok")
+
+        agent = DefaultAgent(config=config, secrets=secrets)
+        agent.add_advisor(FunctionAdvisor("dynamic", lambda: "[DYNAMIC] ctx"))
+        agent.chat("hi")
+
+        call_args = mock_completion.call_args
+        messages = call_args[0][0] if call_args[0] else call_args.kwargs.get("messages", [])
+        system_content = messages[0].get("content", "")
+        if isinstance(system_content, list):
+            system_content = " ".join(
+                block.get("text", "") if isinstance(block, dict) else str(block) for block in system_content
+            )
+        assert "[DYNAMIC] ctx" in system_content
+
+    @patch("roshni.core.llm.client.LLMClient.completion")
+    @patch("roshni.core.llm.token_budget.get_budget_pressure", return_value=0.0)
+    def test_system_health_advisor_auto_registered(self, _budget, mock_completion, config, secrets):
+        """DefaultAgent auto-registers SystemHealthAdvisor."""
+        agent = DefaultAgent(config=config, secrets=secrets)
+        advisor_names = [a.name for a in agent._advisors]
+        assert "system_health" in advisor_names
+
+    @patch("roshni.core.llm.client.LLMClient.completion")
+    @patch("roshni.core.llm.token_budget.get_budget_pressure", return_value=0.0)
+    def test_metrics_hook_auto_registered(self, _budget, mock_completion, config, secrets):
+        """DefaultAgent auto-registers MetricsHook."""
+        agent = DefaultAgent(config=config, secrets=secrets)
+        hook_names = [h.name for h in agent._after_chat_hooks]
+        assert "metrics" in hook_names
+
+    @patch("roshni.core.llm.client.LLMClient.completion")
+    @patch("roshni.core.llm.token_budget.get_budget_pressure", return_value=0.0)
+    def test_failing_advisor_doesnt_break_chat(self, _budget, mock_completion, config, secrets):
+        from roshni.agent.advisor import FunctionAdvisor
+
+        def bad_advisor():
+            raise RuntimeError("advisor boom")
+
+        mock_completion.return_value = _make_response("still works")
+
+        agent = DefaultAgent(config=config, secrets=secrets, advisors=[FunctionAdvisor("bad", bad_advisor)])
+        result = agent.chat("hi")
+        assert result.text == "still works"
