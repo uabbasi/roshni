@@ -111,6 +111,7 @@ class DefaultAgent(BaseAgent):
         advisors: list[Advisor] | None = None,
         after_chat_hooks: list[AfterChatHook] | None = None,
         circuit_breaker: Any | None = None,
+        persona_factory: Callable[[str | None], str] | None = None,
     ):
         super().__init__(name=name)
 
@@ -131,6 +132,7 @@ class DefaultAgent(BaseAgent):
         self._archive_dir = archive_dir
         self._min_context_tokens = min_context_tokens
         self._tool_policy = tool_policy
+        self._persona_factory = persona_factory
 
         # Advisor and hook registries
         self._advisors: list[Advisor] = list(advisors) if advisors else []
@@ -259,6 +261,21 @@ class DefaultAgent(BaseAgent):
         """
         self._busy.set()
         start = time()
+
+        # Budget gate — fail fast with a clean message before adding to history
+        from roshni.core.llm.token_budget import check_budget
+
+        within_budget, _remaining = check_budget()
+        if not within_budget:
+            logger.warning("Daily budget exceeded — rejecting chat")
+            self._busy.clear()
+            return ChatResult(
+                text="Daily token budget exceeded. Try again tomorrow.",
+                duration=0.0,
+                tool_calls=[],
+                model=self.model,
+            )
+
         tool_call_log: list[dict[str, Any]] = []
         max_followups = int(kwargs.get("max_followups", 3))
         clear_history = call_type in ("heartbeat", "scheduled")
@@ -306,6 +323,9 @@ class DefaultAgent(BaseAgent):
                 # Build tool schemas
                 tool_schemas = [t.to_litellm_schema() for t in effective_tools] if effective_tools else None
 
+            # Track selected model for accurate ChatResult reporting
+            actual_model = selected_model or self.model
+
             # --- Main tool loop ---
             self._run_tool_loop(
                 tool_schemas=tool_schemas,
@@ -329,7 +349,7 @@ class DefaultAgent(BaseAgent):
                     text=prompt,
                     duration=time() - start,
                     tool_calls=tool_call_log,
-                    model=self.model,
+                    model=actual_model,
                 )
 
             # --- Follow-up queue processing ---
@@ -361,13 +381,25 @@ class DefaultAgent(BaseAgent):
                         text=prompt,
                         duration=time() - start,
                         tool_calls=tool_call_log,
-                        model=self.model,
+                        model=actual_model,
                     )
 
             # --- Empty response synthesis ---
             final_text = self._extract_final_text()
-            if not final_text and tool_call_log:
+            if tool_call_log and (not final_text or self._looks_like_thinking(final_text)):
+                if final_text:
+                    logger.info("Response looks like thinking/planning — re-synthesizing")
                 final_text = self._synthesize_response(selected_model)
+
+            # --- Proactive memory offer ---
+            if final_text:
+                from roshni.agent.memory import detect_memorable_event, detect_memory_trigger
+
+                has_save_tool = any(t.name == "save_memory" for t in self.tools)
+                used_save = any(tc.get("name") == "save_memory" for tc in tool_call_log)
+                if has_save_tool and not used_save and not detect_memory_trigger(message):
+                    if detect_memorable_event(message):
+                        final_text += "\n\n*Should I save this to memory? It seems significant.*"
 
             # Trim history
             self._trim_history()
@@ -376,7 +408,7 @@ class DefaultAgent(BaseAgent):
                 text=final_text,
                 duration=time() - start,
                 tool_calls=tool_call_log,
-                model=self.model,
+                model=actual_model,
             )
 
             # Fire after-chat hooks (each in a daemon thread)
@@ -404,7 +436,7 @@ class DefaultAgent(BaseAgent):
                         role="assistant",
                         content=final_text,
                         metadata={
-                            "model": self.model,
+                            "model": actual_model,
                             "duration": result.duration,
                             "tools_called": [tc.get("name") for tc in tool_call_log],
                         },
@@ -419,7 +451,7 @@ class DefaultAgent(BaseAgent):
                 text=f"Sorry, something went wrong: {e}",
                 duration=time() - start,
                 tool_calls=tool_call_log,
-                model=self.model,
+                model=locals().get("actual_model", self.model),
             )
         finally:
             self._busy.clear()
@@ -617,12 +649,31 @@ class DefaultAgent(BaseAgent):
         """
         from roshni.core.llm.caching import build_cached_system_message
 
-        messages: list[dict[str, Any]] = []
+        # Minimal mode: bare persona + history, skip advisors entirely.
+        # Used for synthesis calls where advisor context wastes tokens.
+        if prompt_mode == "minimal":
+            messages: list[dict[str, Any]] = []
+            if self._persona_prompt_minimal:
+                messages.append({"role": "system", "content": self._persona_prompt_minimal})
+            if clear_history:
+                turn_start = getattr(self, "_turn_start", 0)
+                history = list(self.message_history[turn_start:])
+            else:
+                history = list(self.message_history)
+            messages.extend(history)
+            for msg in messages:
+                if msg.get("content") is None:
+                    msg["content"] = ""
+            return messages
+
+        # Refresh persona via factory if provided (channel-aware timestamps, etc.)
+        if self._persona_factory:
+            self._persona_prompt = self._persona_factory(channel)
+
+        messages = []
 
         # Select persona prompt variant
-        if prompt_mode == "minimal":
-            persona = self._persona_prompt_minimal
-        elif prompt_mode == "compact":
+        if prompt_mode == "compact":
             persona = self._persona_prompt_compact
         else:
             persona = self._persona_prompt
@@ -714,18 +765,54 @@ class DefaultAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     def _extract_final_text(self) -> str:
-        """Walk history backward to find the last assistant text.
+        """Walk current-turn history backward to find the last assistant text.
+
+        Only considers messages from the current turn (after _turn_start) to
+        avoid picking up stale responses from previous queries.
 
         Skips assistant messages that carry tool_calls — those contain
         internal tool-calling syntax (e.g. Gemini's ``call:default_api:...``),
         not user-facing prose.
         """
-        for msg in reversed(self.message_history):
+        turn_start = getattr(self, "_turn_start", 0)
+        turn_messages = self.message_history[turn_start:]
+        for msg in reversed(turn_messages):
             if msg.get("role") == "assistant" and msg.get("content"):
                 if msg.get("tool_calls"):
                     continue
                 return str(msg["content"])
         return ""
+
+    @staticmethod
+    def _looks_like_thinking(text: str) -> bool:
+        """Detect if response text is model thinking/planning rather than a real answer.
+
+        Some models (e.g. Gemini 3 Pro) can leak chain-of-thought reasoning as
+        visible text.  Common signals: meta-commentary about strategy, explicit
+        planning steps, and self-referential "I will" statements without actual
+        content delivery.
+        """
+        if len(text) < 50:
+            return False
+        lower = text[:500].lower()
+        signals = 0
+        for pattern in (
+            "my strategy is",
+            "my plan is",
+            "i will structure",
+            "i have sufficient information",
+            "i don't need more searches",
+            "let me plan",
+            "let me structure",
+            "the user is asking",
+            "the user wants",
+            "the user is feeling",
+            "quotes to use:",
+            "plan:",
+        ):
+            if pattern in lower:
+                signals += 1
+        return signals >= 2
 
     def _synthesize_response(self, selected_model: str | None = None) -> str:
         """Force a text response when the LLM only made tool calls."""

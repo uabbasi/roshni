@@ -24,7 +24,7 @@ from .response_continuation import (
     is_response_truncated,
     merge_responses,
 )
-from .token_budget import check_budget, get_usage_summary, record_usage
+from .token_budget import check_budget, get_budget_pressure, get_usage_summary, record_usage
 from .token_management import (
     estimate_token_count,
     format_truncation_warning,
@@ -50,6 +50,7 @@ __all__ = [
     "estimate_token_count",
     "extract_text_from_response",
     "format_truncation_warning",
+    "get_budget_pressure",
     "get_default_model",
     "get_model_context_limit",
     "get_model_max_tokens",

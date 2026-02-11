@@ -20,10 +20,9 @@ from loguru import logger
 # Patterns that suggest the user is expressing something the agent should remember.
 # Tuned for conversational triggers — "always …", "never …", "remember …", etc.
 _MEMORY_TRIGGER_PATTERNS: list[re.Pattern[str]] = [
-    # TODO: Tune these patterns based on downstream usage.
     re.compile(r"\balways\b", re.IGNORECASE),
     re.compile(r"\bnever\b", re.IGNORECASE),
-    re.compile(r"\bremember\b", re.IGNORECASE),
+    re.compile(r"\bremember\b.*\b(that|this|to)\b", re.IGNORECASE),
     re.compile(r"\bdon'?t forget\b", re.IGNORECASE),
     re.compile(r"\bfrom now on\b", re.IGNORECASE),
     re.compile(r"\bgoing forward\b", re.IGNORECASE),
@@ -31,9 +30,37 @@ _MEMORY_TRIGGER_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\bi like\b", re.IGNORECASE),
     re.compile(r"\bi hate\b", re.IGNORECASE),
     re.compile(r"\bkeep in mind\b", re.IGNORECASE),
+    re.compile(r"\bmake sure you\b", re.IGNORECASE),
+    re.compile(r"\bwhen I ask\b", re.IGNORECASE),
+    re.compile(r"\bwhenever I\b", re.IGNORECASE),
+    re.compile(r"\bby default\b", re.IGNORECASE),
+]
+
+# Patterns for implicit memorable events — no explicit "remember" but significant life events.
+_MEMORY_OFFER_PATTERNS: list[re.Pattern[str]] = [
+    # Life events
+    re.compile(r"\b(got promoted|quit my job|moved to|broke up|got engaged|got married|had a baby)\b", re.IGNORECASE),
+    re.compile(r"\b(started a new job|left my job|got fired|got laid off|retired)\b", re.IGNORECASE),
+    # Decisions
+    re.compile(r"\b(decided to|going to switch to|chose to|committed to|signed up for)\b", re.IGNORECASE),
+    # Milestones
+    re.compile(r"\b(hit my goal|personal record|first time I|finally did|reached my target)\b", re.IGNORECASE),
+    # Reflective
+    re.compile(r"\b(really struggling with|realized that|had an epiphany|it hit me that)\b", re.IGNORECASE),
 ]
 
 VALID_SECTIONS = frozenset({"decisions", "open_loops", "preferences", "recurring_patterns"})
+
+
+def detect_memory_trigger(message: str) -> bool:
+    """Return True if *message* contains a memory trigger pattern."""
+    return any(p.search(message) for p in _MEMORY_TRIGGER_PATTERNS)
+
+
+def detect_memorable_event(message: str) -> bool:
+    """Return True if *message* describes a significant event worth offering to save."""
+    return any(p.search(message) for p in _MEMORY_OFFER_PATTERNS)
+
 
 _SECTION_HEADER_RE = re.compile(r"^## (.+)$", re.MULTILINE)
 

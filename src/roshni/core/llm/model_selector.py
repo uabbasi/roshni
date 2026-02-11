@@ -8,10 +8,12 @@ Settings are persisted to disk so they survive restarts.
 
 import json
 import os
+from datetime import datetime
 
 from loguru import logger
 
 from .config import MODEL_CATALOG, THINKING_BUDGET_MAP, ModelConfig, ThinkingLevel
+from .token_budget import get_budget_pressure
 
 # Keywords that suggest a query needs a heavier model.
 _COMPLEX_KEYWORDS: set[str] = {
@@ -49,8 +51,14 @@ class ModelSelector:
         heavy_model: ModelConfig | None = None,
         thinking_model: ModelConfig | None = None,
         settings_path: str = "~/.roshni-data/model_settings.json",
+        quiet_hours: tuple[int, int] | None = None,
+        quiet_model: ModelConfig | None = None,
+        mode_overrides: dict[str, ModelConfig] | None = None,
     ):
         self._settings_path = os.path.expanduser(settings_path)
+        self._quiet_hours = quiet_hours
+        self._quiet_model = quiet_model
+        self._mode_overrides: dict[str, ModelConfig] = dict(mode_overrides) if mode_overrides else {}
 
         saved_light, saved_heavy, saved_thinking = self._load_saved_settings()
         self.light_model = light_model or saved_light or self._default_light()
@@ -81,6 +89,10 @@ class ModelSelector:
         """Single entry point for model selection.
 
         Priority:
+        0. Quiet hours -> quiet model (cheapest, overnight)
+        0b. Budget pressure >= 95% -> light model (near exhaustion)
+        0c. Budget pressure >= 80% -> light model (moderate pressure)
+        0d. Consumer-registered mode override -> exact model
         1. think=True or thinking_level > OFF -> thinking model
         2. mode in heavy_modes -> heavy model
         3. Query length > 150 or complex keywords -> heavy model
@@ -91,6 +103,31 @@ class ModelSelector:
         When *thinking_level* is provided and a thinking model is selected,
         ``selected_config.thinking_budget_tokens`` is set based on the level.
         """
+        # Quiet hours: use cheapest model overnight
+        if self._quiet_hours and self._quiet_model:
+            start, end = self._quiet_hours
+            hour = datetime.now().hour
+            in_quiet = (hour >= start or hour < end) if start > end else (start <= hour < end)
+            if in_quiet:
+                logger.debug(f"Quiet hours ({start}:00-{end}:00) -> {self._quiet_model.display_name}")
+                return self._quiet_model
+
+        # Budget pressure: graceful degradation
+        pressure = get_budget_pressure()
+        if pressure >= 0.95:
+            logger.info(f"Budget pressure {pressure:.0%} -> forcing light model")
+            return self.light_model
+        if pressure >= 0.80:
+            if think or thinking_level > ThinkingLevel.OFF:
+                logger.info(f"Budget pressure {pressure:.0%} -> downgrading thinking to light")
+            return self.light_model
+
+        # Consumer-registered per-mode override (after budget guards)
+        if mode and mode in self._mode_overrides:
+            override = self._mode_overrides[mode]
+            logger.debug(f"Mode override '{mode}' -> {override.display_name}")
+            return override
+
         if think or thinking_level > ThinkingLevel.OFF:
             logger.debug(f"thinking requested -> thinking model: {self.thinking_model.display_name}")
             # Return a copy with thinking_budget_tokens set
@@ -98,6 +135,10 @@ class ModelSelector:
                 thinking_level if thinking_level > ThinkingLevel.OFF else ThinkingLevel.MEDIUM,
                 4096,
             )
+            # Cap thinking budget under moderate pressure
+            if pressure >= 0.60:
+                budget = min(budget, THINKING_BUDGET_MAP[ThinkingLevel.LOW])
+                logger.debug(f"Budget pressure {pressure:.0%} -> capping thinking to LOW")
             return ModelConfig(
                 name=self.thinking_model.name,
                 display_name=self.thinking_model.display_name,

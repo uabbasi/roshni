@@ -400,7 +400,7 @@ class LLMClient:
         return response
 
     def _record_response_usage(self, response: Any, *, provider: str | None = None, model: str | None = None) -> None:
-        """Record token usage from a litellm response, including cache metrics."""
+        """Record token usage from a litellm response, including cache metrics and cost."""
         usage = getattr(response, "usage", None)
         if usage:
             # Anthropic: cache_creation_input_tokens, prompt_tokens_details.cached_tokens
@@ -412,6 +412,15 @@ class LLMClient:
             if not cache_read:
                 cache_read = getattr(usage, "cached_content_token_count", 0) or 0
 
+            # Compute actual dollar cost via litellm
+            cost = 0.0
+            try:
+                import litellm
+
+                cost = litellm.completion_cost(completion_response=response) or 0.0
+            except Exception:
+                pass  # cost tracking never blocks
+
             record_usage(
                 input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
                 output_tokens=getattr(usage, "completion_tokens", 0) or 0,
@@ -419,6 +428,7 @@ class LLMClient:
                 model=model or self.model,
                 cache_creation_tokens=cache_creation,
                 cache_read_tokens=cache_read,
+                cost_usd=cost,
             )
 
     def _build_messages(self, message: str, **kwargs: Any) -> list[dict[str, str]]:
