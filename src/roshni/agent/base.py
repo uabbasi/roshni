@@ -107,6 +107,7 @@ class BaseAgent(ABC):
         channel: str | None = None,
         max_iterations: int = 5,
         on_tool_start: Callable[[str, int, dict | None], None] | None = None,
+        on_stream: Callable[[str], None] | None = None,
         **kwargs: Any,
     ) -> ChatResult:
         """Process a user message, potentially calling tools.
@@ -120,6 +121,9 @@ class BaseAgent(ABC):
             channel: Channel identifier (telegram, cli, etc.).
             max_iterations: Max tool-call rounds.
             on_tool_start: Progress callback ``(tool_name, index, args)``.
+            on_stream: Optional callback for streaming content deltas.
+                When provided, the LLM response is streamed and each text
+                chunk is forwarded to this callback as it arrives.
 
         Returns:
             :class:`ChatResult` with the response text and metadata.
@@ -133,6 +137,7 @@ class BaseAgent(ABC):
         call_type: str | None = None,
         channel: str | None = None,
         on_tool_start: Callable[[str, int, dict | None], None] | None = None,
+        on_stream: Callable[[str], None] | None = None,
         **kwargs: Any,
     ) -> str:
         """Async wrapper that runs :meth:`chat` in an executor.
@@ -150,6 +155,7 @@ class BaseAgent(ABC):
                 call_type=call_type,
                 channel=channel,
                 on_tool_start=on_tool_start,
+                on_stream=on_stream,
                 **kwargs,
             ),
         )

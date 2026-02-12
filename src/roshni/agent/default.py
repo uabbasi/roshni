@@ -243,18 +243,21 @@ class DefaultAgent(BaseAgent):
 
     def chat(
         self,
-        message: str,
+        message: str | list,
         *,
         mode: str | None = None,
         call_type: str | None = None,
         channel: str | None = None,
         max_iterations: int = 5,
         on_tool_start: Callable[[str, int, dict | None], None] | None = None,
+        on_stream: Callable[[str], None] | None = None,
         **kwargs: Any,
     ) -> ChatResult:
         """Process a message with tool-calling loop.
 
         Args:
+            message: User message as a string, or a list of content blocks
+                for multimodal input (e.g. text + images in OpenAI vision format).
             call_type: Optional call classification (e.g. ``"heartbeat"``,
                 ``"scheduled"``).  Heartbeat/scheduled calls skip conversation
                 history to reduce token usage.
@@ -276,6 +279,9 @@ class DefaultAgent(BaseAgent):
                 model=self.model,
             )
 
+        # Extract text representation for logging/token counting/advisors
+        message_text = self._extract_text(message) if isinstance(message, list) else message
+
         tool_call_log: list[dict[str, Any]] = []
         max_followups = int(kwargs.get("max_followups", 3))
         clear_history = call_type in ("heartbeat", "scheduled")
@@ -289,7 +295,7 @@ class DefaultAgent(BaseAgent):
         # Emit AGENT_CHAT_START
         if self._event_bus:
             self._event_bus.emit_sync(
-                Event(name=AGENT_CHAT_START, payload={"message": message, "channel": channel}, source=self.name)
+                Event(name=AGENT_CHAT_START, payload={"message": message_text, "channel": channel}, source=self.name)
             )
 
         try:
@@ -300,11 +306,11 @@ class DefaultAgent(BaseAgent):
                 effective_tools = self.tools
 
             if self._pending_approval:
-                result = self._handle_pending_approval(message, tool_call_log)
+                result = self._handle_pending_approval(message_text, tool_call_log)
                 if result is not None:
                     return result
                 # Approved/denied — tools already executed, resume LLM loop
-                selected_model = self._select_model(message, mode)
+                selected_model = self._select_model(message_text, mode)
                 tool_schemas = [t.to_litellm_schema() for t in effective_tools] if effective_tools else None
             else:
                 # Track where this turn begins (for clear_history slicing)
@@ -318,7 +324,7 @@ class DefaultAgent(BaseAgent):
                     self._maybe_compress_history()
 
                 # Model selection
-                selected_model = self._select_model(message, mode)
+                selected_model = self._select_model(message_text, mode)
 
                 # Build tool schemas
                 tool_schemas = [t.to_litellm_schema() for t in effective_tools] if effective_tools else None
@@ -332,11 +338,12 @@ class DefaultAgent(BaseAgent):
                 tool_call_log=tool_call_log,
                 max_iterations=max_iterations,
                 on_tool_start=on_tool_start,
+                on_stream=on_stream,
                 mode=mode,
                 selected_model=selected_model,
                 clear_history=clear_history,
                 channel=channel,
-                message=message,
+                message=message_text,
             )
             if self._pending_approval:
                 # Approval bail — _run_tool_loop set _pending_approval
@@ -364,6 +371,7 @@ class DefaultAgent(BaseAgent):
                     tool_call_log=tool_call_log,
                     max_iterations=max_iterations,
                     on_tool_start=on_tool_start,
+                    on_stream=None,
                     mode=mode,
                     selected_model=selected_model,
                     clear_history=clear_history,
@@ -397,8 +405,8 @@ class DefaultAgent(BaseAgent):
 
                 has_save_tool = any(t.name == "save_memory" for t in self.tools)
                 used_save = any(tc.get("name") == "save_memory" for tc in tool_call_log)
-                if has_save_tool and not used_save and not detect_memory_trigger(message):
-                    if detect_memorable_event(message):
+                if has_save_tool and not used_save and not detect_memory_trigger(message_text):
+                    if detect_memorable_event(message_text):
                         final_text += "\n\n*Should I save this to memory? It seems significant.*"
 
             # Trim history
@@ -412,14 +420,14 @@ class DefaultAgent(BaseAgent):
             )
 
             # Fire after-chat hooks (each in a daemon thread)
-            self._fire_after_chat_hooks(message, final_text, tool_call_log, channel)
+            self._fire_after_chat_hooks(message_text, final_text, tool_call_log, channel)
 
             # Emit AGENT_CHAT_COMPLETE
             if self._event_bus:
                 self._event_bus.emit_sync(
                     Event(
                         name=AGENT_CHAT_COMPLETE,
-                        payload={"message": message, "response": final_text, "tool_calls": tool_call_log},
+                        payload={"message": message_text, "response": final_text, "tool_calls": tool_call_log},
                         source=self.name,
                     )
                 )
@@ -428,7 +436,7 @@ class DefaultAgent(BaseAgent):
             if self._session_store and self._active_session_id:
                 self._session_store.save_turn(
                     self._active_session_id,
-                    Turn(role="user", content=message, metadata={"channel": channel or ""}),
+                    Turn(role="user", content=message_text, metadata={"channel": channel or ""}),
                 )
                 self._session_store.save_turn(
                     self._active_session_id,
@@ -483,6 +491,7 @@ class DefaultAgent(BaseAgent):
         tool_call_log: list[dict[str, Any]],
         max_iterations: int,
         on_tool_start: Callable[[str, int, dict | None], None] | None,
+        on_stream: Callable[[str], None] | None = None,
         mode: str | None = None,
         selected_model: str | None = None,
         clear_history: bool = False,
@@ -495,6 +504,10 @@ class DefaultAgent(BaseAgent):
         Mutates ``message_history`` and *tool_call_log* in place.
         If an approval-requiring tool is encountered, sets
         ``self._pending_approval`` and returns early.
+
+        When *on_stream* is provided, the final LLM iteration (the one
+        that produces content without tool_calls) is streamed, forwarding
+        text deltas to the callback.
         """
         for _iteration in range(max_iterations):
             # Check for steering messages
@@ -517,10 +530,15 @@ class DefaultAgent(BaseAgent):
             if model_cfg and getattr(model_cfg, "thinking_budget_tokens", None):
                 thinking_kwargs = {"type": "enabled", "budget_tokens": model_cfg.thinking_budget_tokens}
 
-            # Call LLM via LLMClient (budget + usage + retries)
-            response = self._llm.completion(
-                messages, tools=tool_schemas, model=selected_model, thinking=thinking_kwargs
-            )
+            # Call LLM — use streaming when on_stream is provided
+            if on_stream:
+                response = self._llm.stream_completion(
+                    messages, tools=tool_schemas, model=selected_model, thinking=thinking_kwargs, on_chunk=on_stream
+                )
+            else:
+                response = self._llm.completion(
+                    messages, tools=tool_schemas, model=selected_model, thinking=thinking_kwargs
+                )
             choice = response.choices[0]
             assistant_message = choice.message
 

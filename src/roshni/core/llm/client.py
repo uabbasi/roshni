@@ -5,7 +5,9 @@ Provides a simple chat interface across multiple providers (OpenAI,
 Anthropic, Gemini, Ollama) using litellm as the single routing layer.
 """
 
+from collections.abc import Callable
 from time import time
+from types import SimpleNamespace
 from typing import Any
 
 from loguru import logger
@@ -174,6 +176,140 @@ class LLMClient:
             if self.fallback_model:
                 return self._fallback_completion(kwargs, e, is_async=False)
             raise
+
+    def stream_completion(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        stop: list[str] | None = None,
+        model: str | None = None,
+        thinking: dict[str, Any] | None = None,
+        on_chunk: Callable[[str], None] | None = None,
+    ) -> Any:
+        """Streaming completion that calls on_chunk for content deltas.
+
+        Iterates chunks from litellm.completion(stream=True), accumulating
+        content and tool_calls. Content deltas are forwarded to *on_chunk*
+        only when NO tool_calls are detected (i.e. final response only).
+
+        Returns a duck-typed response object matching the non-streaming shape
+        so the caller (tool loop) can treat it identically.
+        """
+        try:
+            import litellm
+        except ImportError:
+            raise ImportError("Install LLM support with: pip install roshni[llm]")
+
+        self._check_budget()
+        kwargs = self._build_completion_kwargs(messages, tools=tools, stop=stop, model=model, thinking=thinking)
+        kwargs["stream"] = True
+        kwargs["stream_options"] = {"include_usage": True}
+
+        try:
+            stream = litellm.completion(**kwargs)
+        except Exception:
+            # Fall back to non-streaming on any stream setup error
+            logger.debug("Streaming setup failed, falling back to non-streaming")
+            kwargs.pop("stream", None)
+            kwargs.pop("stream_options", None)
+            return self.completion(messages, tools=tools, stop=stop, model=model, thinking=thinking)
+
+        return self._consume_stream(stream, on_chunk=on_chunk, model=model)
+
+    def _consume_stream(
+        self,
+        stream: Any,
+        *,
+        on_chunk: Callable[[str], None] | None = None,
+        model: str | None = None,
+    ) -> Any:
+        """Iterate a litellm stream, accumulate content/tool_calls, return assembled response."""
+        content_parts: list[str] = []
+        tool_calls_by_index: dict[int, dict[str, Any]] = {}
+        usage = None
+        has_tool_calls = False
+
+        for chunk in stream:
+            # Extract usage from final chunk
+            chunk_usage = getattr(chunk, "usage", None)
+            if chunk_usage and getattr(chunk_usage, "prompt_tokens", None):
+                usage = chunk_usage
+
+            if not chunk.choices:
+                continue
+
+            delta = chunk.choices[0].delta
+
+            # Accumulate content
+            if hasattr(delta, "content") and delta.content:
+                content_parts.append(delta.content)
+                # Only stream to callback if no tool calls detected yet
+                if on_chunk and not has_tool_calls:
+                    on_chunk(delta.content)
+
+            # Accumulate tool calls
+            if hasattr(delta, "tool_calls") and delta.tool_calls:
+                has_tool_calls = True
+                for tc_delta in delta.tool_calls:
+                    idx = tc_delta.index
+                    if idx not in tool_calls_by_index:
+                        tool_calls_by_index[idx] = {
+                            "id": tc_delta.id or "",
+                            "name": "",
+                            "arguments": "",
+                        }
+                    entry = tool_calls_by_index[idx]
+                    if tc_delta.id:
+                        entry["id"] = tc_delta.id
+                    if hasattr(tc_delta, "function") and tc_delta.function:
+                        if tc_delta.function.name:
+                            entry["name"] = tc_delta.function.name
+                        if tc_delta.function.arguments:
+                            entry["arguments"] += tc_delta.function.arguments
+
+        response = self._assemble_stream_response(
+            content="".join(content_parts),
+            tool_calls_by_index=tool_calls_by_index,
+            usage=usage,
+        )
+        self._record_response_usage(response, model=model)
+        return response
+
+    @staticmethod
+    def _assemble_stream_response(
+        *,
+        content: str,
+        tool_calls_by_index: dict[int, dict[str, Any]],
+        usage: Any,
+    ) -> Any:
+        """Build a duck-typed response matching litellm's non-streaming shape."""
+        # Build tool_calls list
+        assembled_tool_calls = None
+        if tool_calls_by_index:
+            assembled_tool_calls = []
+            for idx in sorted(tool_calls_by_index):
+                tc = tool_calls_by_index[idx]
+                assembled_tool_calls.append(
+                    SimpleNamespace(
+                        id=tc["id"],
+                        type="function",
+                        function=SimpleNamespace(
+                            name=tc["name"],
+                            arguments=tc["arguments"],
+                        ),
+                    )
+                )
+
+        message = SimpleNamespace(
+            content=content or None,
+            tool_calls=assembled_tool_calls,
+        )
+        choice = SimpleNamespace(message=message)
+        return SimpleNamespace(
+            choices=[choice],
+            usage=usage,
+        )
 
     async def acompletion(
         self,

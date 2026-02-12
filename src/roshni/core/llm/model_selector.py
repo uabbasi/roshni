@@ -179,6 +179,17 @@ class ModelSelector:
         """
         return self.select(task_type, mode=query_mode)
 
+    @staticmethod
+    def search_catalog(query: str) -> list[ModelConfig]:
+        """Search MODEL_CATALOG for models matching a partial query string."""
+        query_lower = query.strip().lower()
+        matches = []
+        for provider_models in MODEL_CATALOG.values():
+            for model in provider_models:
+                if query_lower in model.name.lower() or query_lower in model.display_name.lower():
+                    matches.append(model)
+        return matches
+
     def get_current_models(self) -> dict[str, ModelConfig]:
         return {"light": self.light_model, "heavy": self.heavy_model, "thinking": self.thinking_model}
 
