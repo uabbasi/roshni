@@ -482,14 +482,22 @@ class LLMClient:
         if model and model != self.model:
             override_limit = get_model_max_tokens(model, infer_provider(model))
             max_tokens = min(self.max_tokens, override_limit)
+        # Reasoning/thinking models often reject custom temperature.
+        # OpenAI o-series only accepts temperature=1; thinking-enabled calls
+        # also typically don't support it.
+        model_base = effective_model.split("/")[-1] if "/" in effective_model else effective_model
+        is_reasoning = model_base.startswith(("o1", "o3", "o4"))
+        use_temperature = not is_reasoning and not thinking
+
         kwargs: dict[str, Any] = {
             "model": effective_model,
             "messages": messages,
-            "temperature": self.temperature,
             "max_tokens": max_tokens,
             "timeout": self.timeout,
             "num_retries": self.num_retries,
         }
+        if use_temperature:
+            kwargs["temperature"] = self.temperature
         if tools:
             kwargs["tools"] = tools
         if stop:
