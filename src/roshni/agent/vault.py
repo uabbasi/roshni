@@ -12,18 +12,17 @@ class VaultManager:
 
     The vault structure is:
         {vault_path}/{agent_dir}/
-            persona/    — IDENTITY.md, SOUL.md, USER.md, AGENTS.md
+            config/     — IDENTITY.md, SOUL.md, USER.md, AGENTS.md
             memory/     — MEMORY.md
             tasks/      — Task .md files with YAML frontmatter
                 _archive/   — Archived completed tasks
                 _index.md   — Auto-generated dashboard
             projects/   — Project overview .md files
             people/     — Person .md files with frontmatter
-            ideas/      — Idea .md files with frontmatter
             admin/      — audit.md
     """
 
-    _SUBDIRS = ("persona", "memory", "tasks", "projects", "people", "ideas", "admin")
+    _SUBDIRS = ("memory", "tasks", "projects", "people", "admin")
 
     def __init__(self, vault_path: str | Path, agent_dir: str = "jarvis") -> None:
         self.vault_path = Path(vault_path).expanduser()

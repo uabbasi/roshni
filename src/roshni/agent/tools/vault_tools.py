@@ -94,11 +94,11 @@ def _read_md_file_fuzzy(directory: str, name: str) -> str:
 def _save_md_file(directory: str, name: str, frontmatter: dict, body: str) -> str:
     """Save a .md file with YAML frontmatter."""
     os.makedirs(directory, exist_ok=True)
-    today = datetime.now().strftime("%Y-%m-%d")
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
     if "created" not in frontmatter:
-        frontmatter["created"] = today
+        frontmatter["created"] = now
     if "updated" not in frontmatter:
-        frontmatter["updated"] = today
+        frontmatter["updated"] = now
 
     lines = ["---"]
     for key, value in frontmatter.items():
@@ -121,13 +121,13 @@ def _save_md_file(directory: str, name: str, frontmatter: dict, body: str) -> st
 def _append_to_md_file(directory: str, slug: str, content: str) -> str:
     """Append a dated bullet to an existing .md file and update the 'updated' timestamp."""
     path = os.path.join(directory, f"{slug}.md")
-    today = datetime.now().strftime("%Y-%m-%d")
-    bullet = f"\n- {today}: {content}\n"
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    bullet = f"\n- {now}: {content}\n"
 
     with _vault_write_lock:
         with open(path, encoding="utf-8") as f:
             existing = f.read()
-        existing = _update_frontmatter_field(existing, "updated", today)
+        existing = _update_frontmatter_field(existing, "updated", now)
         with open(path, "w", encoding="utf-8") as f:
             f.write(existing.rstrip("\n") + "\n" + bullet)
     return f"Appended to: {slug}.md"

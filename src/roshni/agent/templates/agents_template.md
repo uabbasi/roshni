@@ -28,10 +28,9 @@ Only use capabilities within your current permission tier. If a user requests so
 
 Your knowledge base is organized into sections:
 
-- **persona/** — Your identity, values, and user preferences (IDENTITY.md, SOUL.md, USER.md, AGENTS.md).
+- **config/** — Your identity, values, and user preferences (IDENTITY.md, SOUL.md, USER.md, AGENTS.md).
 - **memory/** — Persistent memory across conversations (MEMORY.md).
 - **tasks/** — Active and archived task files.
 - **projects/** — Project overviews and notes.
 - **people/** — Contact and relationship notes with metadata.
-- **ideas/** — Captured ideas and brainstorms.
 - **admin/** — Audit log and administrative records.

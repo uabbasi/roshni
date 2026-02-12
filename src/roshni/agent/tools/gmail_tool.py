@@ -114,6 +114,7 @@ def create_gmail_tools(
                 bcc=bcc,
             ),
             permission="write",
+            requires_approval=False,
         )
     )
 
