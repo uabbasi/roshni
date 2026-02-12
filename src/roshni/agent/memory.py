@@ -87,8 +87,21 @@ class MemoryManager:
         self._path.write_text("\n".join(lines), encoding="utf-8")
         logger.debug(f"Created memory file: {self._path}")
 
-    def save(self, section: str, content: str) -> str:
-        """Append *content* under *section*. Returns confirmation string."""
+    # Threshold for auto-compaction: when a section exceeds this many entries
+    AUTO_COMPACT_THRESHOLD = 50
+
+    # Jaccard similarity threshold for near-dedup
+    NEAR_DEDUP_THRESHOLD = 0.7
+
+    def save(self, section: str, content: str, *, auto_compact: bool = False) -> str:
+        """Append *content* under *section*. Returns confirmation string.
+
+        Args:
+            section: Section name to save under.
+            content: The information to remember.
+            auto_compact: If True, run compaction when the section exceeds
+                ``AUTO_COMPACT_THRESHOLD`` entries.
+        """
         if section not in VALID_SECTIONS:
             return f"Error: unknown section '{section}'. Valid: {', '.join(sorted(VALID_SECTIONS))}"
         content = content.strip()
@@ -110,7 +123,221 @@ class MemoryManager:
             self._path.write_text(text, encoding="utf-8")
 
         logger.debug(f"Memory saved to [{section}]: {content[:60]}...")
+
+        if auto_compact:
+            section_entries = self._count_section_entries(section)
+            if section_entries > self.AUTO_COMPACT_THRESHOLD:
+                logger.info(f"Section '{section}' has {section_entries} entries, auto-compacting...")
+                self.compact_section(section)
+
         return f"Saved to {section}: {content[:80]}"
+
+    # ------------------------------------------------------------------
+    # Compaction
+    # ------------------------------------------------------------------
+
+    def _parse_sections(self, text: str) -> dict[str, list[str]]:
+        """Parse MEMORY.md into {section_name: [entries]}.
+
+        Entries are the raw lines (including the ``- `` or ``* `` prefix).
+        Non-entry lines within a section are preserved as-is.
+        """
+        sections: dict[str, list[str]] = {}
+        current_section: str | None = None
+
+        for line in text.split("\n"):
+            header_match = _SECTION_HEADER_RE.match(line)
+            if header_match:
+                current_section = header_match.group(1).strip()
+                sections[current_section] = []
+            elif current_section is not None:
+                sections[current_section].append(line)
+
+        return sections
+
+    def _count_section_entries(self, section: str) -> int:
+        """Count entries in a section without full parse overhead."""
+        if not self._path.exists():
+            return 0
+        text = self._path.read_text(encoding="utf-8")
+        parsed = self._parse_sections(text)
+        entries = parsed.get(section, [])
+        return sum(1 for line in entries if line.strip().startswith(("- ", "* ")))
+
+    @staticmethod
+    def _extract_keywords(text: str) -> set[str]:
+        """Extract lowercase keyword tokens from text for similarity comparison."""
+        # Strip bullet prefix and date/topic prefix for keyword extraction
+        cleaned = re.sub(r"^[-*]\s*", "", text.strip())
+        cleaned = re.sub(r"^\*\*\d{4}-\d{2}-\d{2}[^*]*\*\*\s*", "", cleaned)
+        words = re.findall(r"\b[a-z]{3,}\b", cleaned.lower())
+        return set(words)
+
+    @staticmethod
+    def _extract_date_topic(entry: str) -> str | None:
+        """Extract date+topic prefix like '2026-02-10 — ADU:' from an entry."""
+        m = re.match(r"^[-*]\s*\*\*(\d{4}-\d{2}-\d{2}\s*[—–-]\s*[^:*]+):", entry.strip())
+        return m.group(1).strip() if m else None
+
+    def _dedup_entries(self, entries: list[str]) -> list[str]:
+        """Remove exact and near-duplicate entries from a list.
+
+        Strategy:
+        1. Exact dedup: remove entries with identical stripped text (keep first).
+        2. Near dedup: for entries sharing the same date+topic prefix, keep only
+           the longest version. For entries without a date+topic prefix, use
+           Jaccard similarity on keywords — if similarity >= threshold, keep the
+           longer entry.
+        """
+        # Filter to just entry lines vs non-entry lines (blank lines, etc.)
+        entry_lines = []
+        non_entry_lines = []
+        for line in entries:
+            if line.strip().startswith(("- ", "* ")):
+                entry_lines.append(line)
+            else:
+                non_entry_lines.append(line)
+
+        # Step 1: Exact dedup (keep first occurrence)
+        seen_exact: set[str] = set()
+        unique_entries: list[str] = []
+        for line in entry_lines:
+            normalized = line.strip()
+            if normalized in seen_exact:
+                continue
+            seen_exact.add(normalized)
+            unique_entries.append(line)
+
+        # Step 2: Near dedup — date+topic prefix grouping
+        date_topic_groups: dict[str, list[int]] = {}
+        no_prefix_indices: list[int] = []
+
+        for i, line in enumerate(unique_entries):
+            dt = self._extract_date_topic(line)
+            if dt:
+                date_topic_groups.setdefault(dt, []).append(i)
+            else:
+                no_prefix_indices.append(i)
+
+        # For each date+topic group, keep only the longest entry
+        remove_indices: set[int] = set()
+        for indices in date_topic_groups.values():
+            if len(indices) <= 1:
+                continue
+            # Keep the longest entry (most information)
+            longest_idx = max(indices, key=lambda i: len(unique_entries[i]))
+            for idx in indices:
+                if idx != longest_idx:
+                    remove_indices.add(idx)
+
+        # Step 3: Near dedup — Jaccard similarity for non-prefixed entries
+        for i in range(len(no_prefix_indices)):
+            idx_i = no_prefix_indices[i]
+            if idx_i in remove_indices:
+                continue
+            kw_i = self._extract_keywords(unique_entries[idx_i])
+            if not kw_i:
+                continue
+            for j in range(i + 1, len(no_prefix_indices)):
+                idx_j = no_prefix_indices[j]
+                if idx_j in remove_indices:
+                    continue
+                kw_j = self._extract_keywords(unique_entries[idx_j])
+                if not kw_j:
+                    continue
+                intersection = kw_i & kw_j
+                union = kw_i | kw_j
+                similarity = len(intersection) / len(union) if union else 0.0
+                if similarity >= self.NEAR_DEDUP_THRESHOLD:
+                    # Keep the longer entry
+                    shorter = idx_i if len(unique_entries[idx_i]) <= len(unique_entries[idx_j]) else idx_j
+                    remove_indices.add(shorter)
+                    if shorter == idx_i:
+                        break  # idx_i removed, stop comparing it
+
+        result = [line for i, line in enumerate(unique_entries) if i not in remove_indices]
+
+        # Reconstruct: non-entry lines first (usually blank), then entries
+        # Preserve a single blank line between header and entries
+        cleaned_non_entry = [line for line in non_entry_lines if line.strip()]
+        return cleaned_non_entry + result
+
+    def compact(self) -> dict[str, int]:
+        """Deduplicate and compact all memory sections.
+
+        Returns:
+            Dict with counts: {"removed": N, "sections_compacted": N}
+        """
+        with self._lock:
+            text = self._path.read_text(encoding="utf-8")
+
+            # Preserve the title line (# Agent Memory or similar)
+            lines = text.split("\n")
+            title = lines[0] if lines and lines[0].startswith("# ") else ""
+
+            sections = self._parse_sections(text)
+            total_before = 0
+            total_after = 0
+            sections_compacted = 0
+
+            rebuilt_parts = [title, ""] if title else []
+
+            for section_name in sections:
+                entries = sections[section_name]
+                before_count = sum(1 for e in entries if e.strip().startswith(("- ", "* ")))
+                total_before += before_count
+
+                deduped = self._dedup_entries(entries)
+                after_count = sum(1 for e in deduped if e.strip().startswith(("- ", "* ")))
+                total_after += after_count
+
+                if after_count < before_count:
+                    sections_compacted += 1
+
+                rebuilt_parts.append(f"\n## {section_name}")
+                rebuilt_parts.extend(deduped)
+
+            self._path.write_text("\n".join(rebuilt_parts) + "\n", encoding="utf-8")
+
+        removed = total_before - total_after
+        logger.info(f"Memory compacted: {removed} entries removed from {sections_compacted} sections")
+        return {"removed": removed, "sections_compacted": sections_compacted}
+
+    def compact_section(self, section: str) -> dict[str, int]:
+        """Deduplicate and compact a single memory section.
+
+        Returns:
+            Dict with counts: {"removed": N}
+        """
+        with self._lock:
+            text = self._path.read_text(encoding="utf-8")
+            sections = self._parse_sections(text)
+
+            if section not in sections:
+                return {"removed": 0}
+
+            entries = sections[section]
+            before_count = sum(1 for e in entries if e.strip().startswith(("- ", "* ")))
+            deduped = self._dedup_entries(entries)
+            after_count = sum(1 for e in deduped if e.strip().startswith(("- ", "* ")))
+
+            # Rebuild just this section in the original text
+            sections[section] = deduped
+
+            # Preserve the title line
+            lines = text.split("\n")
+            title = lines[0] if lines and lines[0].startswith("# ") else ""
+            rebuilt_parts = [title, ""] if title else []
+
+            for section_name in sections:
+                rebuilt_parts.append(f"\n## {section_name}")
+                rebuilt_parts.extend(sections[section_name])
+
+            self._path.write_text("\n".join(rebuilt_parts) + "\n", encoding="utf-8")
+
+        removed = before_count - after_count
+        logger.info(f"Section '{section}' compacted: {removed} entries removed")
+        return {"removed": removed}
 
     # ------------------------------------------------------------------
     # Daily notes
@@ -207,6 +434,42 @@ def create_save_memory_tool(memory_manager: MemoryManager) -> Any:
             "required": ["section", "content"],
         },
         function=_save_memory,
+        permission="write",
+        requires_approval=False,
+    )
+
+
+def create_compact_memory_tool(memory_manager: MemoryManager) -> Any:
+    """Factory: build a ToolDefinition for the compact_memory action."""
+    from roshni.agent.tools import ToolDefinition
+
+    def _compact_memory(section: str | None = None) -> str:
+        if section:
+            result = memory_manager.compact_section(section)
+            return f"Compacted section '{section}': {result['removed']} duplicates removed."
+        result = memory_manager.compact()
+        return (
+            f"Compacted memory: {result['removed']} duplicates removed across {result['sections_compacted']} sections."
+        )
+
+    return ToolDefinition(
+        name="compact_memory",
+        description=(
+            "Deduplicate and compact memory by removing exact and near-duplicate entries. "
+            "Run this periodically or when memory feels bloated. "
+            "Optionally target a specific section."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "section": {
+                    "type": "string",
+                    "enum": sorted(VALID_SECTIONS),
+                    "description": "Optional: compact only this section. If omitted, compact all sections.",
+                },
+            },
+        },
+        function=_compact_memory,
         permission="write",
         requires_approval=False,
     )
