@@ -76,8 +76,13 @@ def _find_list_by_name(client: TrelloClient, board_id: str, name: str) -> dict[s
     return None
 
 
-def _get_trello_today(client: TrelloClient, board_id: str) -> str:
+def _get_trello_today(client: TrelloClient, board_id: str = "") -> str:
     """Build a daily briefing from 'Today' and 'This Week' lists."""
+    if not board_id:
+        boards = client.list_boards(include_closed=False)
+        if not boards:
+            return "No open Trello boards found."
+        board_id = boards[0]["id"]
     now = datetime.now(UTC)
     sections: list[str] = []
 
