@@ -486,9 +486,9 @@ class LLMClient:
         # OpenAI o-series only accepts temperature=1; thinking-enabled calls
         # also typically don't support it.
         model_base = effective_model.split("/")[-1] if "/" in effective_model else effective_model
-        is_reasoning = model_base.startswith(("o1", "o3", "o4"))
-        is_gemini3 = "gemini-3" in model_base
-        use_temperature = not is_reasoning and not thinking and not is_gemini3
+        is_reasoning = model_base.startswith(("o1", "o3", "o4")) or "deepseek-r1" in model_base
+        is_temp_fixed = "gemini-3" in model_base or "reasoning" in model_base
+        use_temperature = not is_reasoning and not thinking and not is_temp_fixed
 
         kwargs: dict[str, Any] = {
             "model": effective_model,
