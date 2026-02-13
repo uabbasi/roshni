@@ -80,4 +80,41 @@ class SystemHealthAdvisor:
         return "\n".join(parts)
 
 
-__all__ = ["MemoryAdvisor", "SystemHealthAdvisor"]
+class SystemStateAdvisor:
+    """Injects current system state for audit and temporal awareness.
+
+    Always emits — gives the LLM accurate clock, process, and resource info.
+    """
+
+    name = "system_state"
+
+    def advise(self, *, message: str, channel: str | None = None) -> str:
+        import os
+        import platform
+        import time
+        from datetime import datetime
+
+        now = datetime.now()
+        lines = [
+            "[SYSTEM STATE — authoritative clock, always use this for current time]",
+            f"Current time: {now.strftime('%I:%M %p')} ({now.strftime('%Y-%m-%d %H:%M:%S')} unix {int(time.time())})",
+            f"Host: {platform.node()} | PID {os.getpid()}",
+        ]
+
+        try:
+            import psutil
+
+            proc = psutil.Process()
+            uptime_s = time.time() - proc.create_time()
+            h, rem = divmod(int(uptime_s), 3600)
+            m, _s = divmod(rem, 60)
+            mem_mb = proc.memory_info().rss / 1024 / 1024
+            cpu = proc.cpu_percent(interval=0.1)
+            lines.append(f"Uptime: {h}h{m:02d}m | Mem: {mem_mb:.0f} MB | CPU: {cpu:.1f}%")
+        except ImportError:
+            pass
+
+        return "\n".join(lines)
+
+
+__all__ = ["MemoryAdvisor", "SystemHealthAdvisor", "SystemStateAdvisor"]

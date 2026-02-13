@@ -6,16 +6,20 @@ Requires ``roshni[llm]`` (i.e. ``litellm``).
 
 from .caching import build_cached_system_message, build_system_content_blocks, is_cache_eligible
 from .config import (
+    FAMILY_ALIASES,
     MODEL_CATALOG,
     MODEL_OUTPUT_TOKEN_LIMITS,
     THINKING_BUDGET_MAP,
     ModelConfig,
     ThinkingLevel,
+    get_available_families,
     get_default_model,
+    get_family_models,
     get_model_max_tokens,
     infer_provider,
+    resolve_family,
 )
-from .model_selector import ModelSelector, get_model_selector, reset_model_selector
+from .model_selector import ModelSelector, TaskSignals, get_model_selector, reset_model_selector
 from .response_continuation import (
     ContinuationConfig,
     ContinuationResult,
@@ -34,6 +38,7 @@ from .token_management import (
 from .utils import extract_text_from_response
 
 __all__ = [
+    "FAMILY_ALIASES",
     "MODEL_CATALOG",
     "MODEL_OUTPUT_TOKEN_LIMITS",
     "THINKING_BUDGET_MAP",
@@ -42,6 +47,7 @@ __all__ = [
     "ModelConfig",
     "ModelSelector",
     "ResponseContinuationMixin",
+    "TaskSignals",
     "ThinkingLevel",
     "build_cached_system_message",
     "build_continuation_prompt",
@@ -50,8 +56,10 @@ __all__ = [
     "estimate_token_count",
     "extract_text_from_response",
     "format_truncation_warning",
+    "get_available_families",
     "get_budget_pressure",
     "get_default_model",
+    "get_family_models",
     "get_model_context_limit",
     "get_model_max_tokens",
     "get_model_selector",
@@ -62,5 +70,6 @@ __all__ = [
     "merge_responses",
     "record_usage",
     "reset_model_selector",
+    "resolve_family",
     "truncate_context",
 ]

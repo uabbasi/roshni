@@ -9,7 +9,7 @@ import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
 
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 
 from roshni.agent.tools import ToolDefinition
 

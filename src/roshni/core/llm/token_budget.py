@@ -162,8 +162,14 @@ def get_usage_summary(daily_limit: int | None = None, daily_cost_limit: float | 
         total = data.get("input_tokens", 0) + data.get("output_tokens", 0)
         cache_creation = data.get("cache_creation_tokens", 0)
         cache_read = data.get("cache_read_tokens", 0)
-        cache_total = cache_creation + cache_read
-        cache_hit_rate = round(cache_read / cache_total * 100, 1) if cache_total else 0.0
+        input_tokens = data.get("input_tokens", 0)
+        # input_tokens (prompt_tokens) should include cache_read for OpenAI/Gemini;
+        # for Anthropic it may exclude them, so use the larger denominator to be safe.
+        cache_denominator = max(input_tokens, cache_creation + cache_read)
+        if cache_denominator and cache_read:
+            cache_hit_rate = min(round(cache_read / cache_denominator * 100, 1), 100.0)
+        else:
+            cache_hit_rate = 0.0
         cost_used = data.get("cost_usd", 0.0)
         # Use cost-based pct if cost tracking is active
         if cost_used > 0:

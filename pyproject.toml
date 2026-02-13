@@ -38,8 +38,8 @@ dependencies = [
     "google-api-python-client>=2.123",
     "google-auth-oauthlib>=1.0",
     "google-cloud-storage>=2.16",
-    # Web search
-    "duckduckgo-search>=7.0",
+    # Web search (ddgs replaces deprecated duckduckgo-search)
+    "ddgs>=9.10.0",
 ]
 
 [project.optional-dependencies]

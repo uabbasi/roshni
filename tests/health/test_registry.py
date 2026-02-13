@@ -1,6 +1,7 @@
 """Tests for health.registry — plugin discovery."""
 
 from datetime import date
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -43,3 +44,26 @@ class TestRegistry:
         reg = HealthCollectorRegistry()
         result = reg.discover()
         assert isinstance(result, dict)
+
+    def test_discover_accepts_collector_class(self, monkeypatch):
+        ep = MagicMock()
+        ep.name = "fake_ep"
+        ep.load.return_value = FakeCollector
+        monkeypatch.setattr("roshni.health.registry.entry_points", lambda group: [ep])
+
+        reg = HealthCollectorRegistry()
+        result = reg.discover()
+        assert result["fake_ep"] is FakeCollector
+
+    def test_discover_skips_invalid_entry(self, monkeypatch):
+        class NotACollector:
+            pass
+
+        ep = MagicMock()
+        ep.name = "invalid"
+        ep.load.return_value = NotACollector
+        monkeypatch.setattr("roshni.health.registry.entry_points", lambda group: [ep])
+
+        reg = HealthCollectorRegistry()
+        result = reg.discover()
+        assert "invalid" not in result

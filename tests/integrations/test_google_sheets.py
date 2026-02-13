@@ -43,14 +43,19 @@ class TestWithTimeout:
         result = _with_timeout(lambda: 42, timeout=5)
         assert result == 42
 
-    def test_timeout_raises(self):
+    def test_timeout_raises_quickly(self, caplog):
         import time as t
 
         def slow():
             t.sleep(5)
 
-        with pytest.raises(SheetsTimeoutError, match="timed out"):
-            _with_timeout(slow, timeout=1, operation="test op")
+        started = time.monotonic()
+        with caplog.at_level("WARNING"):
+            with pytest.raises(SheetsTimeoutError, match="timed out"):
+                _with_timeout(slow, timeout=1, operation="test op")
+        elapsed = time.monotonic() - started
+        assert elapsed < 2.5
+        assert any("test op timed out after 1s" in rec.message for rec in caplog.records)
 
 
 # -- Row helpers ------------------------------------------------------------

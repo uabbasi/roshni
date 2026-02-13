@@ -35,9 +35,29 @@ class LocalStorage(StorageBackend):
         self.base_path.mkdir(parents=True, exist_ok=True)
 
     def _get_full_path(self, key: str) -> Path:
-        """Get full filesystem path for a key (sanitized against traversal)."""
-        clean_key = key.strip("/").replace("../", "")
-        return self.base_path / clean_key
+        """Resolve a storage key to an absolute path under ``base_path``.
+
+        Rejects unsafe keys (absolute paths, traversal, empty keys, and
+        backslash-delimited paths) to prevent writes outside ``base_path``.
+        """
+        raw_key = key.strip()
+        if not raw_key:
+            raise StoragePermissionError("Storage key cannot be empty.")
+        if "\x00" in raw_key:
+            raise StoragePermissionError("Storage key cannot contain null bytes.")
+        if "\\" in raw_key:
+            raise StoragePermissionError("Storage key cannot contain backslashes. Use '/' separators.")
+
+        key_path = Path(raw_key)
+        if key_path.is_absolute() or raw_key.startswith("~"):
+            raise StoragePermissionError(f"Unsafe storage key '{key}': absolute paths are not allowed.")
+
+        full_path = (self.base_path / key_path).resolve()
+        try:
+            full_path.relative_to(self.base_path)
+        except ValueError as e:
+            raise StoragePermissionError(f"Unsafe storage key '{key}': path traversal is not allowed.") from e
+        return full_path
 
     def _get_metadata_path(self, key: str) -> Path:
         return self._get_full_path(key).with_suffix(".meta.json")

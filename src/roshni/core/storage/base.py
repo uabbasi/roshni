@@ -55,8 +55,8 @@ class StorageBackend(ABC):
         """Delete an object. Returns True if deleted, False if didn't exist."""
 
     @abstractmethod
-    async def list_keys(self, prefix: str = "", limit: int | None = None) -> AsyncIterator[str]:
-        """List keys with optional prefix filter."""
+    def list_keys(self, prefix: str = "", limit: int | None = None) -> AsyncIterator[str]:
+        """Return an async iterator of keys with optional prefix filter."""
 
     @abstractmethod
     async def get_metadata(self, key: str) -> StorageMetadata:

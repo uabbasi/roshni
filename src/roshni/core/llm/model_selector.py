@@ -8,12 +8,37 @@ Settings are persisted to disk so they survive restarts.
 
 import json
 import os
+from dataclasses import dataclass
 from datetime import datetime
 
 from loguru import logger
 
-from .config import MODEL_CATALOG, THINKING_BUDGET_MAP, ModelConfig, ThinkingLevel
+from .config import (
+    MODEL_CATALOG,
+    THINKING_BUDGET_MAP,
+    ModelConfig,
+    ThinkingLevel,
+    get_available_families,
+    get_family_models,
+)
 from .token_budget import get_budget_pressure
+
+
+@dataclass
+class TaskSignals:
+    """Runtime signals for dynamic model selection.
+
+    Lightweight data bag passed into ``ModelSelector.select()`` to let the
+    selector upgrade/downgrade the tier based on what has happened *so far*
+    in the current tool loop — without coupling to specific tool names.
+    """
+
+    iteration: int = 0
+    tool_result_chars: int = 0  # total chars of tool results so far
+    needs_synthesis: bool = False
+    needs_escalation: bool = False  # light model refused/hedged → retry on heavy
+    channel: str | None = None
+
 
 # Keywords that suggest a query needs a heavier model.
 _COMPLEX_KEYWORDS: set[str] = {
@@ -60,10 +85,11 @@ class ModelSelector:
         self._quiet_model = quiet_model
         self._mode_overrides: dict[str, ModelConfig] = dict(mode_overrides) if mode_overrides else {}
 
-        saved_light, saved_heavy, saved_thinking = self._load_saved_settings()
+        saved_light, saved_heavy, saved_thinking, saved_family = self._load_saved_settings()
         self.light_model = light_model or saved_light or self._default_light()
         self.heavy_model = heavy_model or saved_heavy or self._default_heavy()
         self.thinking_model = thinking_model or saved_thinking or self._default_thinking()
+        self._active_family: str | None = saved_family or self._infer_family()
 
     @staticmethod
     def _default_light() -> ModelConfig:
@@ -85,6 +111,7 @@ class ModelSelector:
         heavy_modes: set[str] | None = None,
         think: bool = False,
         thinking_level: ThinkingLevel = ThinkingLevel.OFF,
+        signals: TaskSignals | None = None,
     ) -> ModelConfig:
         """Single entry point for model selection.
 
@@ -93,12 +120,14 @@ class ModelSelector:
         0b. Budget pressure >= 95% -> light model (near exhaustion)
         0c. Budget pressure >= 80% -> light model (moderate pressure)
         0d. Consumer-registered mode override -> exact model
-        1. think=True or thinking_level > OFF -> thinking model
-        2. mode in heavy_modes -> heavy model
-        3. Query length > 150 or complex keywords -> heavy model
-        4. mode in light modes -> light model
-        5. Light keywords -> light model
-        6. Default -> light model
+        1. think=True or thinking_level > OFF or mode=="think" -> thinking model
+        2. Signal: lightweight channels (boot, heartbeat) -> light model
+        3. Signal: substantial tool results or synthesis -> heavy model
+        4. mode in heavy_modes -> heavy model
+        5. Query length > 150 or complex keywords -> heavy model
+        6. mode in light modes -> light model
+        7. Light keywords -> light model
+        8. Default -> light model
 
         When *thinking_level* is provided and a thinking model is selected,
         ``selected_config.thinking_budget_tokens`` is set based on the level.
@@ -128,7 +157,7 @@ class ModelSelector:
             logger.debug(f"Mode override '{mode}' -> {override.display_name}")
             return override
 
-        if think or thinking_level > ThinkingLevel.OFF:
+        if think or thinking_level > ThinkingLevel.OFF or mode == "think":
             logger.debug(f"thinking requested -> thinking model: {self.thinking_model.display_name}")
             # Return a copy with thinking_budget_tokens set
             budget = THINKING_BUDGET_MAP.get(
@@ -150,6 +179,20 @@ class ModelSelector:
                 thinking_budget_tokens=budget,
             )
 
+        # Signal-based: lightweight channels stay light
+        if signals and signals.channel in ("boot", "heartbeat"):
+            logger.debug(f"Channel '{signals.channel}' -> light model: {self.light_model.display_name}")
+            return self.light_model
+
+        # Signal-based: substantial tool results, synthesis, or escalation → heavy
+        if signals and (signals.tool_result_chars > 500 or signals.needs_synthesis or signals.needs_escalation):
+            logger.debug(
+                f"Signal upgrade (chars={signals.tool_result_chars}, "
+                f"synthesis={signals.needs_synthesis}, escalation={signals.needs_escalation})"
+                f" -> heavy model: {self.heavy_model.display_name}"
+            )
+            return self.heavy_model
+
         if mode:
             if heavy_modes and mode in heavy_modes:
                 logger.debug(f"Mode '{mode}' in heavy_modes -> heavy model: {self.heavy_model.display_name}")
@@ -157,9 +200,8 @@ class ModelSelector:
             if mode.lower() in _LIGHT_MODES:
                 logger.debug(f"Mode '{mode}' -> light model: {self.light_model.display_name}")
                 return self.light_model
-            # Any other explicit mode defaults to heavy
-            logger.debug(f"Mode '{mode}' -> heavy model: {self.heavy_model.display_name}")
-            return self.heavy_model
+            # Unknown modes (smart, explore, data, etc.) fall through to query heuristics
+            logger.debug(f"Mode '{mode}' not in heavy/light sets, falling through to query heuristics")
 
         query_lower = query.lower()
         if len(query) > 150 or any(kw in query_lower for kw in _COMPLEX_KEYWORDS):
@@ -193,6 +235,37 @@ class ModelSelector:
     def get_current_models(self) -> dict[str, ModelConfig]:
         return {"light": self.light_model, "heavy": self.heavy_model, "thinking": self.thinking_model}
 
+    @property
+    def active_family(self) -> str | None:
+        """Current family name, or None if models are from mixed providers."""
+        return self._active_family
+
+    def _infer_family(self) -> str | None:
+        """Check if all 3 models share a provider — return it, or None if mixed."""
+        providers = {self.light_model.provider, self.heavy_model.provider, self.thinking_model.provider}
+        if len(providers) == 1:
+            provider = providers.pop()
+            if provider in get_available_families():
+                return provider
+        return None
+
+    def switch_family(self, provider_key: str) -> tuple[ModelConfig, ModelConfig, ModelConfig] | None:
+        """Switch all 3 tiers to a provider family. Returns the new models or None if invalid."""
+        family = get_family_models(provider_key)
+        if family is None:
+            return None
+        light, heavy, thinking = family
+        self.light_model = light
+        self.heavy_model = heavy
+        self.thinking_model = thinking
+        self._active_family = provider_key
+        self._save_settings()
+        logger.info(
+            f"Switched model family to {provider_key}: "
+            f"{light.display_name} / {heavy.display_name} / {thinking.display_name}"
+        )
+        return family
+
     def set_models(
         self,
         light: ModelConfig | None = None,
@@ -205,6 +278,7 @@ class ModelSelector:
             self.heavy_model = heavy
         if thinking:
             self.thinking_model = thinking
+        self._active_family = self._infer_family()
         self._save_settings()
 
     # --- persistence --------------------------------------------------------
@@ -216,26 +290,28 @@ class ModelSelector:
                 "light_model": {"name": self.light_model.name, "provider": self.light_model.provider},
                 "heavy_model": {"name": self.heavy_model.name, "provider": self.heavy_model.provider},
                 "thinking_model": {"name": self.thinking_model.name, "provider": self.thinking_model.provider},
+                "active_family": self._active_family,
             }
             with open(self._settings_path, "w") as f:
                 json.dump(settings, f, indent=2)
         except Exception as e:
             logger.error(f"Failed to save model settings: {e}")
 
-    def _load_saved_settings(self) -> tuple[ModelConfig | None, ModelConfig | None, ModelConfig | None]:
+    def _load_saved_settings(self) -> tuple[ModelConfig | None, ModelConfig | None, ModelConfig | None, str | None]:
         try:
             if not os.path.exists(self._settings_path):
-                return None, None, None
+                return None, None, None, None
             with open(self._settings_path) as f:
                 settings = json.load(f)
 
             light = self._find_in_catalog(settings.get("light_model", {}))
             heavy = self._find_in_catalog(settings.get("heavy_model", {}))
             thinking = self._find_in_catalog(settings.get("thinking_model", {}))
-            return light, heavy, thinking
+            family = settings.get("active_family")
+            return light, heavy, thinking, family
         except Exception as e:
             logger.error(f"Failed to load model settings: {e}")
-            return None, None, None
+            return None, None, None, None
 
     @staticmethod
     def _find_in_catalog(data: dict) -> ModelConfig | None:

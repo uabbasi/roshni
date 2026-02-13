@@ -162,6 +162,39 @@ MODEL_CATALOG: dict[str, list[ModelConfig]] = {
 }
 
 
+FAMILY_ALIASES: dict[str, str] = {
+    "claude": "anthropic",
+    "gpt": "openai",
+    "llama": "groq",
+    "grok": "xai",
+    "anthropic": "anthropic",
+    "openai": "openai",
+    "gemini": "gemini",
+    "deepseek": "deepseek",
+    "xai": "xai",
+    "groq": "groq",
+    "local": "local",
+}
+
+
+def resolve_family(name: str) -> str | None:
+    """Resolve a user-provided name to a MODEL_CATALOG key."""
+    return FAMILY_ALIASES.get(name.strip().lower())
+
+
+def get_family_models(provider_key: str) -> tuple[ModelConfig, ModelConfig, ModelConfig] | None:
+    """Get (light, heavy, thinking) for a provider. None if < 3 models."""
+    models = MODEL_CATALOG.get(provider_key)
+    if not models or len(models) < 3:
+        return None
+    return (models[0], models[1], models[2])
+
+
+def get_available_families() -> list[str]:
+    """Provider keys with full light/heavy/thinking families."""
+    return [k for k, v in MODEL_CATALOG.items() if len(v) >= 3]
+
+
 def get_default_model(provider: str) -> str:
     """Get the default litellm model string for a provider."""
     model_map = {

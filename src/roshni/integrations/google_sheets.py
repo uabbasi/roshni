@@ -28,6 +28,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
 from dataclasses import dataclass
@@ -48,19 +49,27 @@ class SheetsTimeoutError(TimeoutError):
 
 
 def _with_timeout(
-    func,
+    func: Callable[[], T],
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
     operation: str = "Google Sheets call",
 ):
     """Execute *func* (zero-arg callable) with a wall-clock timeout."""
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(func)
-        try:
-            return future.result(timeout=timeout)
-        except FuturesTimeout:
-            raise SheetsTimeoutError(
-                f"{operation} timed out after {timeout}s. Check network connection or try again later."
-            )
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(func)
+    timed_out = False
+    try:
+        return future.result(timeout=timeout)
+    except FuturesTimeout:
+        timed_out = True
+        cancelled = future.cancel()
+        log.warning("%s timed out after %ss (cancelled=%s)", operation, timeout, cancelled)
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise SheetsTimeoutError(
+            f"{operation} timed out after {timeout}s. Check network connection or try again later."
+        )
+    finally:
+        if not timed_out:
+            executor.shutdown(wait=True, cancel_futures=False)
 
 
 # -- Smart cache -----------------------------------------------------------

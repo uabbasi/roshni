@@ -14,7 +14,20 @@ from typing import Any
 
 from loguru import logger
 
-from .collector import HealthCollector
+from .collector import BaseCollector, HealthCollector
+
+
+def _is_collector_class(candidate: Any) -> bool:
+    """Return True for classes that match the collector contract."""
+    if not isinstance(candidate, type):
+        return False
+    if issubclass(candidate, BaseCollector):
+        return True
+
+    # Duck-typed support for third-party collectors not inheriting BaseCollector.
+    return hasattr(candidate, "name") and all(
+        callable(getattr(candidate, method_name, None)) for method_name in ("collect", "validate", "get_config_schema")
+    )
 
 
 class HealthCollectorRegistry:
@@ -29,12 +42,13 @@ class HealthCollectorRegistry:
         for ep in eps:
             try:
                 cls = ep.load()
-                if isinstance(cls, type) and issubclass(cls, HealthCollector):
+                if _is_collector_class(cls):
                     self._collectors[ep.name] = cls
                     logger.debug(f"Discovered health collector: {ep.name}")
                 else:
-                    # Protocol check for non-class callables
-                    self._collectors[ep.name] = cls
+                    logger.warning(
+                        f"Skipping health collector '{ep.name}': entry point does not load a collector class."
+                    )
             except Exception as e:
                 logger.warning(f"Failed to load health collector '{ep.name}': {e}")
 

@@ -6,6 +6,7 @@ from roshni.core.storage import (
     CompressionType,
     LocalStorage,
     StorageKeyError,
+    StoragePermissionError,
     compress_bytes,
     compress_json,
     decompress_bytes,
@@ -145,3 +146,12 @@ class TestLocalStorage:
         await storage.save("url_test.txt", b"hi", content_type="text/plain")
         url = await storage.get_url("url_test.txt")
         assert url.startswith("file://")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "unsafe_key",
+        ["", " ", "..//x", "/tmp/x", "../escape.txt", r"..\\escape.txt", "~/secret.txt"],
+    )
+    async def test_rejects_unsafe_keys(self, storage, unsafe_key):
+        with pytest.raises(StoragePermissionError):
+            await storage.save(unsafe_key, b"blocked", compress=False)

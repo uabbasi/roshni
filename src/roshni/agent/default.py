@@ -34,7 +34,7 @@ from roshni.core.events import (
     EventBus,
 )
 from roshni.core.llm.client import LLMClient
-from roshni.core.llm.model_selector import ModelSelector
+from roshni.core.llm.model_selector import ModelSelector, TaskSignals
 from roshni.core.secrets import SecretsManager
 
 from .session import Session, SessionStore, Turn
@@ -204,6 +204,11 @@ class DefaultAgent(BaseAgent):
         self._circuit_breaker = circuit_breaker if isinstance(circuit_breaker, CircuitBreaker) else CircuitBreaker()
         self._advisors.append(SystemHealthAdvisor(circuit_breaker=self._circuit_breaker))
         self._after_chat_hooks.append(MetricsHook(self._circuit_breaker))
+
+        # System state: always-on clock + process info for temporal awareness & audit
+        from roshni.agent.advisors import SystemStateAdvisor
+
+        self._advisors.insert(0, SystemStateAdvisor())
 
         # Backward compat: wrap on_chat_complete as a hook
         if on_chat_complete:
@@ -509,7 +514,19 @@ class DefaultAgent(BaseAgent):
         that produces content without tool_calls) is streamed, forwarding
         text deltas to the callback.
         """
+        tool_result_chars = 0
+
         for _iteration in range(max_iterations):
+            # Per-iteration model re-evaluation after first iteration
+            if _iteration > 0 and self._model_selector:
+                signals = TaskSignals(
+                    iteration=_iteration,
+                    tool_result_chars=tool_result_chars,
+                    channel=channel,
+                )
+                config = self._model_selector.select(message, mode=mode, heavy_modes=self._heavy_modes, signals=signals)
+                selected_model = config.name
+                self._last_selected_model_config = config
             # Check for steering messages
             steering = self.drain_steering()
             if steering:
@@ -562,8 +579,28 @@ class DefaultAgent(BaseAgent):
                 ]
             self.message_history.append(msg_dict)
 
-            # If no tool calls, we're done
+            # If no tool calls, check for refusal before breaking
             if not hasattr(assistant_message, "tool_calls") or not assistant_message.tool_calls:
+                # Refusal detection: if light model refused and we haven't escalated yet,
+                # pop the refusal, escalate to heavy, and retry
+                content = self._normalize_content(assistant_message.content) if assistant_message.content else ""
+                if _iteration == 0 and self._model_selector and self._looks_like_refusal(content):
+                    logger.info("Refusal detected on iteration 0, escalating to heavy model")
+                    # Remove the refusal response from history
+                    self.message_history.pop()
+                    # Re-select with escalation signal — next iteration uses heavy
+                    signals = TaskSignals(
+                        iteration=1,
+                        tool_result_chars=tool_result_chars,
+                        needs_escalation=True,
+                        channel=channel,
+                    )
+                    config = self._model_selector.select(
+                        message, mode=mode, heavy_modes=self._heavy_modes, signals=signals
+                    )
+                    selected_model = config.name
+                    self._last_selected_model_config = config
+                    continue  # retry with heavy model
                 break
 
             # Execute tool calls
@@ -631,6 +668,7 @@ class DefaultAgent(BaseAgent):
                         "result": result,
                     }
                 )
+                tool_result_chars += len(str(result))
 
                 # Add tool result to history
                 self.message_history.append(
@@ -832,8 +870,72 @@ class DefaultAgent(BaseAgent):
                 signals += 1
         return signals >= 2
 
+    @staticmethod
+    def _looks_like_refusal(text: str) -> bool:
+        """Detect if the model refused to use tools or hedged on capability.
+
+        Light models sometimes claim they can't do things they actually have
+        tools for (search_web, fetch_webpage, ask_khaldun, etc.).
+        Detecting this lets us escalate to the heavy model for a retry.
+
+        Covers three refusal categories:
+        1. Web/research: "I can't browse", "I can't search the web"
+        2. Financial/stock: "I can't fetch stock prices", "I don't have market data"
+        3. Real-time data: "I don't have access to real-time information"
+        """
+        if len(text) < 20:
+            return False
+        lower = text[:600].lower()
+        for pattern in (
+            # --- Web / research refusals ---
+            "i can't browse",
+            "i cannot browse",
+            "i can't search the web",
+            "i cannot search the web",
+            "i don't have access to the internet",
+            "i don't have browsing",
+            "i'm not able to browse",
+            "i'm not able to search the web",
+            # --- Real-time / knowledge-cutoff refusals ---
+            "i don't have access to real-time",
+            "i cannot access real-time",
+            "i can't access real-time",
+            "my knowledge cutoff",
+            "my training data",
+            "i don't have the ability to",
+            "i lack the ability",
+            # --- Financial / stock refusals ---
+            "i can't fetch stock",
+            "i cannot fetch stock",
+            "i don't have access to stock",
+            "i can't get real-time stock",
+            "i don't have access to market",
+            "i can't access market data",
+            "i cannot provide real-time",
+            "i don't have live",
+            "i can't look up current",
+            "i cannot look up current",
+            # --- General capability refusals ---
+            "beyond my capabilities",
+            "outside my capabilities",
+            "i'm unable to access",
+            "i cannot fetch",
+            "i can't fetch",
+            "i'm not able to fetch",
+        ):
+            if pattern in lower:
+                return True
+        return False
+
     def _synthesize_response(self, selected_model: str | None = None) -> str:
         """Force a text response when the LLM only made tool calls."""
+        # Upgrade to heavy model for synthesis — tool results need reasoning
+        if self._model_selector:
+            signals = TaskSignals(needs_synthesis=True)
+            config = self._model_selector.select("", signals=signals)
+            selected_model = config.name
+            self._last_selected_model_config = config
+
         self.message_history.append(
             {"role": "user", "content": "Based on all the tool results above, provide a complete written response."}
         )
@@ -852,7 +954,7 @@ class DefaultAgent(BaseAgent):
     # Model auto-selection
     # ------------------------------------------------------------------
 
-    def _select_model(self, query: str, mode: str | None) -> str | None:
+    def _select_model(self, query: str, mode: str | None, signals: TaskSignals | None = None) -> str | None:
         """Choose light, heavy, or thinking model via ModelSelector."""
         if not self._model_selector:
             return None
@@ -860,6 +962,7 @@ class DefaultAgent(BaseAgent):
             query,
             mode=mode,
             heavy_modes=self._heavy_modes,
+            signals=signals,
         )
         self._last_selected_model_config = config
         return config.name
