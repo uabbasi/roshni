@@ -487,7 +487,8 @@ class LLMClient:
         # also typically don't support it.
         model_base = effective_model.split("/")[-1] if "/" in effective_model else effective_model
         is_reasoning = model_base.startswith(("o1", "o3", "o4"))
-        use_temperature = not is_reasoning and not thinking
+        is_gemini3 = "gemini-3" in model_base
+        use_temperature = not is_reasoning and not thinking and not is_gemini3
 
         kwargs: dict[str, Any] = {
             "model": effective_model,
