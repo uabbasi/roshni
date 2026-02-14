@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -167,6 +168,7 @@ class TaskStore:
     def __init__(self, tasks_dir: str | Path) -> None:
         self.tasks_dir = Path(tasks_dir)
         self._archive_dir = self.tasks_dir / "_archive"
+        self._create_lock = threading.Lock()
 
     def _ensure_dir(self) -> None:
         self.tasks_dir.mkdir(parents=True, exist_ok=True)
@@ -197,25 +199,26 @@ class TaskStore:
         due: str = "",
     ) -> Task:
         """Create a new task and write it to disk."""
-        self._ensure_dir()
-        task_id = _next_id(self.tasks_dir)
-        now = datetime.now()
-        task = Task(
-            id=task_id,
-            title=title,
-            status=TaskStatus.OPEN,
-            priority=TaskPriority(priority),
-            project=project,
-            tags=tags or [],
-            due=_parse_datetime(due) if due else None,
-            created=now,
-            updated=now,
-            body=description,
-        )
-        slug = _slugify(title)
-        filename = f"{task_id}-{slug}.md"
-        _write_task(task, self.tasks_dir / filename)
-        return task
+        with self._create_lock:
+            self._ensure_dir()
+            task_id = _next_id(self.tasks_dir)
+            now = datetime.now()
+            task = Task(
+                id=task_id,
+                title=title,
+                status=TaskStatus.OPEN,
+                priority=TaskPriority(priority),
+                project=project,
+                tags=tags or [],
+                due=_parse_datetime(due) if due else None,
+                created=now,
+                updated=now,
+                body=description,
+            )
+            slug = _slugify(title)
+            filename = f"{task_id}-{slug}.md"
+            _write_task(task, self.tasks_dir / filename)
+            return task
 
     def get(self, task_id: str) -> Task | None:
         """Get a task by ID. Returns None if not found."""

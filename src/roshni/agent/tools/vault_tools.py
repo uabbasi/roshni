@@ -122,7 +122,8 @@ def _append_to_md_file(directory: str, slug: str, content: str) -> str:
     """Append a dated bullet to an existing .md file and update the 'updated' timestamp."""
     path = os.path.join(directory, f"{slug}.md")
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    bullet = f"\n- {now}: {content}\n"
+    bullet_date = datetime.now().strftime("%Y-%m-%d")
+    bullet = f"\n- {bullet_date}: {content}\n"
 
     with _vault_write_lock:
         with open(path, encoding="utf-8") as f:

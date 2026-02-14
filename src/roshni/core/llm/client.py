@@ -135,39 +135,26 @@ class LLMClient:
 
         self._check_budget()
         kwargs = self._build_completion_kwargs(messages, tools=tools, stop=stop, model=model, thinking=thinking)
-
-        _BadRequestError = getattr(litellm, "BadRequestError", None)
+        active_profile_name = self._inject_active_auth_profile(kwargs)
 
         try:
-            response = litellm.completion(**kwargs)
+            response = self._completion_with_recovery(kwargs, litellm=litellm)
             self._record_response_usage(response)
             return response
         except Exception as e:
-            # Thinking not supported by this model — retry without it
-            if _BadRequestError and isinstance(e, _BadRequestError):
-                if thinking and "thinking" in str(e).lower():
-                    logger.warning(f"Thinking not supported by {kwargs.get('model')}, retrying without")
-                    kwargs.pop("thinking", None)
-                    response = litellm.completion(**kwargs)
-                    self._record_response_usage(response)
-                    return response
-                raise
-
             if not isinstance(e, (litellm.RateLimitError, litellm.APIError, litellm.APIConnectionError)):
                 raise
 
             # Try auth profile rotation before falling back to a different model
             if self._auth_profile_manager:
-                active = self._auth_profile_manager.get_active()
-                if active:
-                    self._auth_profile_manager.mark_failed(active.name)
-                next_profile = self._auth_profile_manager.rotate()
-                if next_profile:
+                if active_profile_name:
+                    self._auth_profile_manager.mark_failed(active_profile_name)
+                while next_profile := self._auth_profile_manager.rotate():
                     kwargs["api_key"] = next_profile.api_key
                     if next_profile.model:
                         kwargs["model"] = next_profile.model
                     try:
-                        response = litellm.completion(**kwargs)
+                        response = self._completion_with_recovery(kwargs, litellm=litellm)
                         self._auth_profile_manager.mark_success(next_profile.name)
                         self._record_response_usage(response)
                         return response
@@ -328,42 +315,34 @@ class LLMClient:
 
         self._check_budget()
         kwargs = self._build_completion_kwargs(messages, tools=tools, stop=stop, model=model, thinking=thinking)
+        active_profile_name = self._inject_active_auth_profile(kwargs)
 
         _BadRequestError = getattr(litellm, "BadRequestError", None)
 
         try:
-            response = await litellm.acompletion(**kwargs)
+            response = await self._acompletion_with_recovery(kwargs, litellm=litellm)
             self._record_response_usage(response)
             return response
         except Exception as e:
-            if _BadRequestError and isinstance(e, _BadRequestError):
-                if thinking and "thinking" in str(e).lower():
-                    logger.warning(f"Thinking not supported by {kwargs.get('model')}, retrying without")
-                    kwargs.pop("thinking", None)
-                    response = await litellm.acompletion(**kwargs)
-                    self._record_response_usage(response)
-                    return response
-                raise
-
             if not isinstance(e, (litellm.RateLimitError, litellm.APIError, litellm.APIConnectionError)):
                 raise
 
             if self._auth_profile_manager:
-                active = self._auth_profile_manager.get_active()
-                if active:
-                    self._auth_profile_manager.mark_failed(active.name)
-                next_profile = self._auth_profile_manager.rotate()
-                if next_profile:
+                if active_profile_name:
+                    self._auth_profile_manager.mark_failed(active_profile_name)
+                while next_profile := self._auth_profile_manager.rotate():
                     kwargs["api_key"] = next_profile.api_key
                     if next_profile.model:
                         kwargs["model"] = next_profile.model
                     try:
-                        response = await litellm.acompletion(**kwargs)
+                        response = await self._acompletion_with_recovery(kwargs, litellm=litellm)
                         self._auth_profile_manager.mark_success(next_profile.name)
                         self._record_response_usage(response)
                         return response
                     except (litellm.RateLimitError, litellm.APIError, litellm.APIConnectionError):
                         self._auth_profile_manager.mark_failed(next_profile.name)
+            if _BadRequestError and isinstance(e, _BadRequestError):
+                raise
             if self.fallback_model:
                 return await self._fallback_completion(kwargs, e, is_async=True)
             raise
@@ -486,9 +465,7 @@ class LLMClient:
         # OpenAI o-series only accepts temperature=1; thinking-enabled calls
         # also typically don't support it.
         model_base = effective_model.split("/")[-1] if "/" in effective_model else effective_model
-        is_reasoning = model_base.startswith(("o1", "o3", "o4")) or "deepseek-r1" in model_base
-        is_temp_fixed = "gemini-3" in model_base or "reasoning" in model_base
-        use_temperature = not is_reasoning and not thinking and not is_temp_fixed
+        use_temperature = self._supports_custom_temperature(model_base, thinking=thinking)
 
         kwargs: dict[str, Any] = {
             "model": effective_model,
@@ -527,22 +504,104 @@ class LLMClient:
         kwargs["model"] = self.fallback_model
         kwargs["max_tokens"] = min(kwargs.get("max_tokens", fallback_limit), fallback_limit)
 
-        # Gemini 3 models require temperature >= 1.0 to avoid degraded performance
-        if "gemini-3" in self.fallback_model and kwargs.get("temperature", 1.0) < 1.0:
-            kwargs["temperature"] = 1.0
+        # Gemini 3 and reasoning models often reject explicit temperature.
+        if not self._supports_custom_temperature(self.fallback_model, thinking=kwargs.get("thinking")):
+            kwargs.pop("temperature", None)
 
         if is_async:
             return self._afallback_completion(kwargs, litellm)
 
-        response = litellm.completion(**kwargs)
+        response = self._completion_with_recovery(kwargs, litellm=litellm)
         self._record_response_usage(response, provider=self.fallback_provider, model=self.fallback_model)
         return response
 
     async def _afallback_completion(self, kwargs: dict[str, Any], litellm: Any) -> Any:
         """Async fallback completion."""
-        response = await litellm.acompletion(**kwargs)
+        response = await self._acompletion_with_recovery(kwargs, litellm=litellm)
         self._record_response_usage(response, provider=self.fallback_provider, model=self.fallback_model)
         return response
+
+    def _inject_active_auth_profile(self, kwargs: dict[str, Any]) -> str | None:
+        """Populate api_key/model from active auth profile when explicit key not provided."""
+        if not self._auth_profile_manager or "api_key" in kwargs:
+            return None
+        active = self._auth_profile_manager.get_active()
+        if not active:
+            return None
+        kwargs["api_key"] = active.api_key
+        if active.model:
+            kwargs["model"] = active.model
+        return active.name
+
+    @staticmethod
+    def _supports_custom_temperature(model_name: str, *, thinking: dict[str, Any] | None = None) -> bool:
+        """Return False when model/thinking mode likely rejects custom temperature."""
+        if thinking:
+            return False
+        model_lower = model_name.lower()
+        model_base = model_lower.split("/")[-1] if "/" in model_lower else model_lower
+        if model_base.startswith(("o1", "o3", "o4")):
+            return False
+        no_temp_markers = ("gemini-3", "deepseek-r1", "reasoner", "reasoning")
+        return not any(marker in model_lower for marker in no_temp_markers)
+
+    @staticmethod
+    def _is_parameter_unsupported(message: str, parameter: str) -> bool:
+        msg = message.lower()
+        if parameter not in msg:
+            return False
+        keywords = (
+            "unsupported",
+            "not supported",
+            "unknown",
+            "unrecognized",
+            "invalid",
+            "not allowed",
+            "only default",
+        )
+        return any(k in msg for k in keywords)
+
+    def _apply_bad_request_recovery(self, kwargs: dict[str, Any], error: Exception) -> bool:
+        """Mutate kwargs to recover from known provider incompatibilities."""
+        message = str(error)
+
+        if "thinking" in kwargs and self._is_parameter_unsupported(message, "thinking"):
+            kwargs.pop("thinking", None)
+            logger.warning(f"Thinking not supported by {kwargs.get('model')}, retrying without")
+            return True
+
+        if "temperature" in kwargs and self._is_parameter_unsupported(message, "temperature"):
+            kwargs.pop("temperature", None)
+            logger.warning(f"Temperature not supported by {kwargs.get('model')}, retrying without")
+            return True
+
+        return False
+
+    def _completion_with_recovery(self, kwargs: dict[str, Any], *, litellm: Any) -> Any:
+        """Call litellm.completion with self-healing retries for BadRequest incompatibilities."""
+        _BadRequestError = getattr(litellm, "BadRequestError", None)
+        for _ in range(3):
+            try:
+                return litellm.completion(**kwargs)
+            except Exception as e:
+                if _BadRequestError and isinstance(e, _BadRequestError):
+                    if self._apply_bad_request_recovery(kwargs, e):
+                        continue
+                raise
+        return litellm.completion(**kwargs)
+
+    async def _acompletion_with_recovery(self, kwargs: dict[str, Any], *, litellm: Any) -> Any:
+        """Async version of _completion_with_recovery."""
+        _BadRequestError = getattr(litellm, "BadRequestError", None)
+        for _ in range(3):
+            try:
+                return await litellm.acompletion(**kwargs)
+            except Exception as e:
+                if _BadRequestError and isinstance(e, _BadRequestError):
+                    if self._apply_bad_request_recovery(kwargs, e):
+                        continue
+                raise
+        return await litellm.acompletion(**kwargs)
 
     def _record_response_usage(self, response: Any, *, provider: str | None = None, model: str | None = None) -> None:
         """Record token usage from a litellm response, including cache metrics and cost."""

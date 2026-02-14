@@ -14,6 +14,7 @@ from typing import Any
 
 import aiofiles
 import aiofiles.os
+from loguru import logger
 
 from .base import StorageBackend, StorageKeyError, StorageMetadata, StoragePermissionError
 from .compression import (
@@ -170,13 +171,16 @@ class LocalStorage(StorageBackend):
         meta_path = self._get_metadata_path(key)
 
         if meta_path.exists():
-            async with aiofiles.open(meta_path, "rb") as f:
-                data = await f.read()
-            meta_dict = decompress_json(data)
-            meta_dict["created_at"] = datetime.fromisoformat(meta_dict["created_at"])
-            meta_dict["modified_at"] = datetime.fromisoformat(meta_dict["modified_at"])
-            meta_dict["key"] = key  # always use the requested key
-            return StorageMetadata(**meta_dict)
+            try:
+                async with aiofiles.open(meta_path, "rb") as f:
+                    data = await f.read()
+                meta_dict = decompress_json(data)
+                meta_dict["created_at"] = datetime.fromisoformat(meta_dict["created_at"])
+                meta_dict["modified_at"] = datetime.fromisoformat(meta_dict["modified_at"])
+                meta_dict["key"] = key  # always use the requested key
+                return StorageMetadata(**meta_dict)
+            except Exception as e:
+                logger.warning(f"Invalid metadata sidecar for key '{key}': {e}. Falling back to file stats.")
 
         # Fallback to file stats
         path = self._get_full_path(key)

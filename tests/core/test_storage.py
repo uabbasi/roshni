@@ -127,6 +127,16 @@ class TestLocalStorage:
         assert meta.size > 0
 
     @pytest.mark.asyncio
+    async def test_get_metadata_falls_back_when_sidecar_corrupt(self, storage):
+        await storage.save("corrupt_meta.txt", b"payload", content_type="text/plain")
+        meta_path = storage._get_metadata_path("corrupt_meta.txt")
+        meta_path.write_bytes(b"not-valid-json-or-gzip")
+
+        meta = await storage.get_metadata("corrupt_meta.txt")
+        assert meta.key == "corrupt_meta.txt"
+        assert meta.size > 0
+
+    @pytest.mark.asyncio
     async def test_copy(self, storage):
         await storage.save("src.txt", b"original", content_type="text/plain")
         meta = await storage.copy("src.txt", "dst.txt")

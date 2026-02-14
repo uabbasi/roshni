@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 
 import pytest
 
@@ -175,3 +176,39 @@ def test_concurrent_writes(tmp_path):
     assert len(loaded.turns) == num_turns
     contents = {t.content for t in loaded.turns}
     assert contents == {f"msg-{i}" for i in range(num_turns)}
+
+
+@pytest.mark.smoke
+def test_concurrent_close_and_writes(tmp_path):
+    """close_session should not corrupt files while turns are being appended."""
+    store = JSONLSessionStore(tmp_path / "sessions")
+    session = Session(agent_name="close-race")
+    store.create_session(session)
+
+    writes = 50
+    done = threading.Event()
+    errors: list[Exception] = []
+
+    def writer() -> None:
+        try:
+            for i in range(writes):
+                store.save_turn(session.id, Turn(role="user", content=f"turn-{i}"))
+                time.sleep(0.001)
+        except Exception as e:
+            errors.append(e)
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=writer)
+    thread.start()
+    time.sleep(0.01)
+    store.close_session(session.id)
+    thread.join(timeout=5)
+
+    assert done.is_set()
+    assert not errors
+
+    loaded = store.load_session(session.id)
+    assert loaded is not None
+    assert loaded.ended is not None
+    assert len(loaded.turns) == writes

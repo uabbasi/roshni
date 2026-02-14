@@ -11,11 +11,15 @@ import tempfile
 import threading
 from datetime import datetime, timedelta
 
+from loguru import logger
+
 _lock = threading.Lock()
 _LOCK_TIMEOUT = 5  # seconds — don't block LLM calls forever on hung fs
 _DEFAULT_DAILY_LIMIT = 500_000
 _DEFAULT_DAILY_COST_LIMIT = 7.0  # USD — primary budget control
 _BUDGET_RESET_HOUR = 6  # Reset budget at 6am, not midnight
+_FAIL_OPEN_ON_ERROR = False  # safer default: fail closed when budget state is unavailable
+_degraded_warned: set[str] = set()
 
 # Module-level path — set via configure() or defaults to ~/.roshni-data/token_usage.json
 _usage_path: str | None = None
@@ -25,18 +29,29 @@ def configure(
     data_dir: str | None = None,
     daily_limit: int | None = None,
     daily_cost_limit: float | None = None,
+    fail_open_on_error: bool | None = None,
 ) -> None:
     """Set the storage path and/or daily limit for token tracking.
 
     Call once at startup.  If never called, defaults apply.
     """
-    global _usage_path, _DEFAULT_DAILY_LIMIT, _DEFAULT_DAILY_COST_LIMIT
+    global _usage_path, _DEFAULT_DAILY_LIMIT, _DEFAULT_DAILY_COST_LIMIT, _FAIL_OPEN_ON_ERROR
     if data_dir is not None:
         _usage_path = os.path.join(os.path.expanduser(data_dir), "token_usage.json")
     if daily_limit is not None:
         _DEFAULT_DAILY_LIMIT = daily_limit
     if daily_cost_limit is not None:
         _DEFAULT_DAILY_COST_LIMIT = daily_cost_limit
+    if fail_open_on_error is not None:
+        _FAIL_OPEN_ON_ERROR = bool(fail_open_on_error)
+
+
+def _log_degraded_once(reason: str) -> None:
+    """Log one warning per degradation reason to avoid log spam."""
+    if reason in _degraded_warned:
+        return
+    _degraded_warned.add(reason)
+    logger.warning(f"Token budget tracker degraded: {reason}")
 
 
 def _get_path() -> str:
@@ -99,9 +114,10 @@ def record_usage(
     cache_read_tokens: int = 0,
     cost_usd: float = 0.0,
 ) -> None:
-    """Add tokens to today's tally.  Silent on errors."""
+    """Add tokens to today's tally. Never raises."""
     try:
         if not _lock.acquire(timeout=_LOCK_TIMEOUT):
+            _log_degraded_once("lock timeout in record_usage; usage increment skipped")
             return
         try:
             data = _load()
@@ -114,8 +130,8 @@ def record_usage(
             _save(data)
         finally:
             _lock.release()
-    except Exception:
-        pass  # budget tracking never blocks
+    except Exception as e:
+        _log_degraded_once(f"record_usage write failure: {e}")
 
 
 def check_budget(daily_limit: int | None = None, daily_cost_limit: float | None = None) -> tuple[bool, int]:
@@ -127,7 +143,10 @@ def check_budget(daily_limit: int | None = None, daily_cost_limit: float | None 
     cost_limit = daily_cost_limit or _DEFAULT_DAILY_COST_LIMIT
     try:
         if not _lock.acquire(timeout=_LOCK_TIMEOUT):
-            return True, token_limit  # fail-open on contention
+            _log_degraded_once("lock timeout in check_budget")
+            if _FAIL_OPEN_ON_ERROR:
+                return True, token_limit
+            return False, 0
         try:
             data = _load()
         finally:
@@ -144,8 +163,11 @@ def check_budget(daily_limit: int | None = None, daily_cost_limit: float | None 
         # Fallback: token-based (legacy / cost not yet recorded)
         total = data.get("input_tokens", 0) + data.get("output_tokens", 0)
         return total < token_limit, token_limit - total
-    except Exception:
-        return True, token_limit  # fail-open
+    except Exception as e:
+        _log_degraded_once(f"check_budget failure: {e}")
+        if _FAIL_OPEN_ON_ERROR:
+            return True, token_limit
+        return False, 0
 
 
 def get_usage_summary(daily_limit: int | None = None, daily_cost_limit: float | None = None) -> dict:
@@ -154,6 +176,7 @@ def get_usage_summary(daily_limit: int | None = None, daily_cost_limit: float | 
     cost_limit = daily_cost_limit or _DEFAULT_DAILY_COST_LIMIT
     try:
         if not _lock.acquire(timeout=_LOCK_TIMEOUT):
+            _log_degraded_once("lock timeout in get_usage_summary")
             return {}
         try:
             data = _load()
@@ -191,7 +214,8 @@ def get_usage_summary(daily_limit: int | None = None, daily_cost_limit: float | 
             "cost_usd": round(cost_used, 4),
             "cost_limit_usd": cost_limit,
         }
-    except Exception:
+    except Exception as e:
+        _log_degraded_once(f"get_usage_summary failure: {e}")
         return {}
 
 
@@ -199,7 +223,8 @@ def get_budget_pressure() -> float:
     """Return 0.0-1.0 indicating budget pressure. 0=fine, 1=exhausted."""
     try:
         if not _lock.acquire(timeout=_LOCK_TIMEOUT):
-            return 0.0  # fail-open
+            _log_degraded_once("lock timeout in get_budget_pressure")
+            return 0.0  # neutral pressure
         try:
             data = _load()
         finally:
@@ -209,5 +234,6 @@ def get_budget_pressure() -> float:
             return min(1.0, cost_used / _DEFAULT_DAILY_COST_LIMIT)
         total = data.get("input_tokens", 0) + data.get("output_tokens", 0)
         return min(1.0, total / _DEFAULT_DAILY_LIMIT)
-    except Exception:
+    except Exception as e:
+        _log_degraded_once(f"get_budget_pressure failure: {e}")
         return 0.0  # fail-open

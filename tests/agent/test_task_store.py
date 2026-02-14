@@ -1,6 +1,7 @@
 """Tests for the task store."""
 
 from datetime import datetime, timedelta
+import threading
 
 import pytest
 
@@ -66,6 +67,29 @@ class TestCreate:
         t = s.create("Auto-created dir")
         assert new_dir.is_dir()
         assert t.title == "Auto-created dir"
+
+    def test_concurrent_create_produces_unique_ids(self, store):
+        created_ids: list[str] = []
+        errors: list[Exception] = []
+        lock = threading.Lock()
+
+        def _create(i: int) -> None:
+            try:
+                t = store.create(f"Task {i}")
+                with lock:
+                    created_ids.append(t.id)
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=_create, args=(i,)) for i in range(20)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors
+        assert len(created_ids) == 20
+        assert len(set(created_ids)) == 20
 
 
 class TestGet:

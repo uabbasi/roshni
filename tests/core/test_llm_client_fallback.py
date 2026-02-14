@@ -28,9 +28,15 @@ class _MockAPIConnectionError(Exception):
         super().__init__(message)
 
 
+class _MockBadRequestError(Exception):
+    def __init__(self, message="", llm_provider="", model="", status_code=400):
+        super().__init__(message)
+
+
 _litellm_mock.RateLimitError = _MockRateLimitError
 _litellm_mock.APIError = _MockAPIError
 _litellm_mock.APIConnectionError = _MockAPIConnectionError
+_litellm_mock.BadRequestError = _MockBadRequestError
 _litellm_mock.completion = MagicMock()
 _litellm_mock.acompletion = MagicMock()
 
@@ -239,3 +245,84 @@ class TestFallbackCompletion:
             cache_read_tokens=0,
             cost_usd=0.0,
         )
+
+
+class TestCompatibilityRecovery:
+    @patch("roshni.core.llm.client.check_budget", return_value=(True, 100_000))
+    @patch("roshni.core.llm.client.record_usage")
+    def test_deepseek_reasoner_omits_temperature(self, mock_record, mock_budget):
+        from roshni.core.llm.client import LLMClient
+
+        captured = {}
+
+        def side_effect(**kwargs):
+            captured.update(kwargs)
+            return _make_response("OK")
+
+        _litellm_mock.completion = MagicMock(side_effect=side_effect)
+        client = LLMClient(model="deepseek/deepseek-reasoner")
+        client.completion([{"role": "user", "content": "hi"}])
+
+        assert "temperature" not in captured
+
+    @patch("roshni.core.llm.client.check_budget", return_value=(True, 100_000))
+    @patch("roshni.core.llm.client.record_usage")
+    def test_bad_request_temperature_retries_without_temperature(self, mock_record, mock_budget):
+        from roshni.core.llm.client import LLMClient
+
+        calls = []
+
+        def side_effect(**kwargs):
+            calls.append(dict(kwargs))
+            if "temperature" in kwargs:
+                raise _MockBadRequestError("temperature is not supported for this model")
+            return _make_response("Recovered")
+
+        _litellm_mock.completion = MagicMock(side_effect=side_effect)
+        client = LLMClient(model="gpt-4o-mini")
+        resp = client.completion([{"role": "user", "content": "hi"}])
+
+        assert resp.choices[0].message.content == "Recovered"
+        assert len(calls) == 2
+        assert "temperature" in calls[0]
+        assert "temperature" not in calls[1]
+
+    def test_temperature_contract_with_prefixed_and_unprefixed_reasoning_models(self):
+        from roshni.core.llm.client import LLMClient
+
+        assert LLMClient._supports_custom_temperature("o3") is False
+        assert LLMClient._supports_custom_temperature("openai/o3") is False
+        assert LLMClient._supports_custom_temperature("deepseek/deepseek-reasoner") is False
+        assert LLMClient._supports_custom_temperature("gpt-5.2-chat-latest") is True
+
+
+class TestAuthProfileFailover:
+    @patch("roshni.core.llm.client.check_budget", return_value=(True, 100_000))
+    @patch("roshni.core.llm.client.record_usage")
+    def test_tries_all_auth_profiles_before_fallback(self, mock_record, mock_budget):
+        from roshni.core.llm.auth_profiles import AuthProfile
+        from roshni.core.llm.client import LLMClient
+
+        profiles = [
+            AuthProfile(name="p1", provider="anthropic", api_key="key-1"),
+            AuthProfile(name="p2", provider="anthropic", api_key="key-2"),
+            AuthProfile(name="p3", provider="anthropic", api_key="key-3"),
+        ]
+        attempted_keys = []
+
+        def side_effect(**kwargs):
+            attempted_keys.append(kwargs.get("api_key"))
+            if kwargs.get("api_key") != "key-3":
+                raise _MockRateLimitError("Rate limited")
+            return _make_response("Recovered with profile 3")
+
+        _litellm_mock.completion = MagicMock(side_effect=side_effect)
+
+        client = LLMClient(
+            model="anthropic/claude-sonnet-4-20250514",
+            auth_profiles=profiles,
+        )
+        resp = client.completion([{"role": "user", "content": "hi"}])
+
+        assert resp.choices[0].message.content == "Recovered with profile 3"
+        assert attempted_keys == ["key-1", "key-2", "key-3"]

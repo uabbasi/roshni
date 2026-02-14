@@ -22,7 +22,7 @@ class VaultManager:
             admin/      — audit.md
     """
 
-    _SUBDIRS = ("memory", "tasks", "projects", "people", "admin")
+    _SUBDIRS = ("persona", "memory", "tasks", "projects", "people", "ideas", "admin")
 
     def __init__(self, vault_path: str | Path, agent_dir: str = "jarvis") -> None:
         self.vault_path = Path(vault_path).expanduser()

@@ -83,3 +83,33 @@ class TestAtomicWrite:
         with open(path) as f:
             data = json.load(f)
         assert data["calls"] == 1
+
+
+class TestDegradedMode:
+    def test_lock_contention_fails_closed_by_default(self, monkeypatch):
+        class _NoLock:
+            def acquire(self, timeout=0):
+                return False
+
+            def release(self):
+                return None
+
+        monkeypatch.setattr(token_budget, "_FAIL_OPEN_ON_ERROR", False)
+        monkeypatch.setattr(token_budget, "_lock", _NoLock())
+        within, remaining = token_budget.check_budget(daily_limit=1000)
+        assert within is False
+        assert remaining == 0
+
+    def test_lock_contention_can_fail_open_when_configured(self, monkeypatch):
+        class _NoLock:
+            def acquire(self, timeout=0):
+                return False
+
+            def release(self):
+                return None
+
+        monkeypatch.setattr(token_budget, "_FAIL_OPEN_ON_ERROR", True)
+        monkeypatch.setattr(token_budget, "_lock", _NoLock())
+        within, remaining = token_budget.check_budget(daily_limit=1000)
+        assert within is True
+        assert remaining == 1000
