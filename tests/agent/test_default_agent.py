@@ -1,6 +1,7 @@
 """Tests for DefaultAgent."""
 
 import os
+import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -736,3 +737,42 @@ class TestAdvisorIntegration:
         agent = DefaultAgent(config=config, secrets=secrets, advisors=[FunctionAdvisor("bad", bad_advisor)])
         result = agent.chat("hi")
         assert result.text == "still works"
+
+
+class TestAfterChatHookPool:
+    @patch("roshni.core.llm.token_budget.get_budget_pressure", return_value=0.0)
+    def test_fire_hooks_uses_executor_pool(self, _budget, config, secrets):
+        from roshni.agent.advisor import FunctionAfterChatHook
+
+        calls = {"submit": 0, "ran": 0}
+
+        class _FakePool:
+            def submit(self, fn):
+                calls["submit"] += 1
+                fn()
+                return MagicMock(done=lambda: True)
+
+        hook = FunctionAfterChatHook("hook", lambda **kwargs: calls.__setitem__("ran", calls["ran"] + 1))
+        agent = DefaultAgent(config=config, secrets=secrets, after_chat_hooks=[hook])
+
+        with patch.object(DefaultAgent, "_get_hook_pool", return_value=_FakePool()):
+            agent._fire_after_chat_hooks("m", "r", [], None)
+
+        assert calls["submit"] >= 1
+        assert calls["ran"] == 1
+
+    @patch("roshni.core.llm.token_budget.get_budget_pressure", return_value=0.0)
+    def test_fire_hooks_drops_when_saturated(self, _budget, config, secrets):
+        from roshni.agent.advisor import FunctionAfterChatHook
+
+        hook = FunctionAfterChatHook("hook", lambda **kwargs: None)
+        agent = DefaultAgent(config=config, secrets=secrets, after_chat_hooks=[hook])
+
+        original_slots = DefaultAgent._HOOK_SLOTS
+        try:
+            DefaultAgent._HOOK_SLOTS = threading.BoundedSemaphore(0)
+            agent._fire_after_chat_hooks("m", "r", [], None)
+        finally:
+            DefaultAgent._HOOK_SLOTS = original_slots
+
+        assert agent._hook_futures == []

@@ -37,13 +37,32 @@ class _TextExtractor(HTMLParser):
                 self.parts.append(text)
 
 
-def _http_get(url: str, timeout: int = 10) -> bytes:
+def _http_get(url: str, timeout: int = 10, max_bytes: int = 2_000_000) -> bytes:
     req = urllib.request.Request(
         url=url,
         headers={"User-Agent": "RoshniBot/0.1 (https://github.com/uabbasi/roshni)"},
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read()
+        content_length = resp.headers.get("Content-Length")
+        if content_length:
+            try:
+                content_len = int(content_length)
+            except ValueError:
+                content_len = 0
+            if content_len > max_bytes:
+                raise ValueError(f"Response too large ({content_len} bytes); limit is {max_bytes} bytes")
+
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = resp.read(64 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise ValueError(f"Response exceeded size limit ({max_bytes} bytes)")
+            chunks.append(chunk)
+        return b"".join(chunks)
 
 
 def _weather(location: str) -> str:

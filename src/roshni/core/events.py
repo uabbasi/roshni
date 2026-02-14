@@ -125,7 +125,8 @@ class EventBus:
                         self._background_tasks.add(task)
                         task.add_done_callback(self._background_tasks.discard)
                     else:
-                        logger.debug(f"Skipping async hook {hook!r} — no running event loop")
+                        # No loop in this thread: run hook to completion so side effects are not lost.
+                        asyncio.run(hook(event))
                 else:
                     hook(event)
             except Exception as exc:

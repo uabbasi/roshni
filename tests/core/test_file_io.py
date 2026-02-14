@@ -1,6 +1,7 @@
 """Tests for roshni.core.utils.file_io."""
 
 import os
+from unittest.mock import patch
 
 import pytest
 
@@ -60,6 +61,14 @@ class TestFrontmatter:
         result = update_frontmatter(content, {"tags": ["c"]})
         fm, _ = parse_frontmatter(result)
         assert set(fm["tags"]) == {"a", "b", "c"}
+
+    def test_parse_frontmatter_logs_on_parse_error(self):
+        content = "---\ntitle: [unclosed\n---\n\nBody"
+        with patch("roshni.core.utils.file_io.logger.warning") as mock_warning:
+            fm, body = parse_frontmatter(content)
+        assert fm == {}
+        assert body == content.strip()
+        assert mock_warning.called
 
 
 class TestMarkdownSections:

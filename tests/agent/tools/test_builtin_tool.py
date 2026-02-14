@@ -5,7 +5,9 @@ from __future__ import annotations
 import datetime
 from unittest.mock import MagicMock, patch
 
-from roshni.agent.tools.builtin_tool import _web_search, create_builtin_tools
+import pytest
+
+from roshni.agent.tools.builtin_tool import _http_get, _web_search, create_builtin_tools
 
 
 def test_builtin_tools_exist():
@@ -140,3 +142,21 @@ def test_no_results_message():
         result = _web_search("obscure nonexistent thing 2025", auto_fetch=False)
 
     assert "No web results found" in result
+
+
+def test_http_get_enforces_max_bytes():
+    class _FakeResp:
+        headers = {"Content-Length": "9999999"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self, _n=-1):
+            return b""
+
+    with patch("roshni.agent.tools.builtin_tool.urllib.request.urlopen", return_value=_FakeResp()):
+        with pytest.raises(ValueError, match="Response too large"):
+            _http_get("https://example.com", max_bytes=1024)

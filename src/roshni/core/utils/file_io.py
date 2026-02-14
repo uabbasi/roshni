@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 import yaml
+from loguru import logger
 
 
 def safe_write(filepath: str, content: str, mode: str = "w", encoding: str = "utf-8") -> None:
@@ -51,7 +52,8 @@ def parse_frontmatter(content: str) -> tuple[dict, str]:
             frontmatter = {}
 
         return frontmatter, remaining
-    except (yaml.YAMLError, Exception):
+    except (yaml.YAMLError, Exception) as e:
+        logger.warning(f"Failed to parse markdown frontmatter: {e}")
         return {}, content
 
 

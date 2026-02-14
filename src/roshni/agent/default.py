@@ -14,6 +14,7 @@ import json
 import re
 import threading
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from time import time
 from typing import Any
@@ -137,6 +138,7 @@ class DefaultAgent(BaseAgent):
         # Advisor and hook registries
         self._advisors: list[Advisor] = list(advisors) if advisors else []
         self._after_chat_hooks: list[AfterChatHook] = list(after_chat_hooks) if after_chat_hooks else []
+        self._hook_futures: list[Future[Any]] = []
 
         # Build system prompt
         if system_prompt:
@@ -1110,16 +1112,34 @@ class DefaultAgent(BaseAgent):
         tool_calls: list[dict[str, Any]],
         channel: str | None = None,
     ) -> None:
-        """Run each AfterChatHook in a daemon thread (fire-and-forget)."""
+        """Run each AfterChatHook in a bounded worker pool (fire-and-forget)."""
+        self._hook_futures = [f for f in self._hook_futures if not f.done()]
+
         for hook in self._after_chat_hooks:
+            if not self._HOOK_SLOTS.acquire(blocking=False):
+                logger.warning(f"Skipping AfterChatHook '{hook.name}': hook queue is saturated")
+                continue
 
             def _run(h: AfterChatHook = hook) -> None:
                 try:
                     h.run(message=message, response=response, tool_calls=tool_calls, channel=channel)
                 except Exception as e:
                     logger.warning(f"AfterChatHook '{h.name}' failed: {e}")
+                finally:
+                    self._HOOK_SLOTS.release()
 
-            threading.Thread(target=_run, daemon=True).start()
+            future = self._get_hook_pool().submit(_run)
+            self._hook_futures.append(future)
+
+    @classmethod
+    def _get_hook_pool(cls) -> ThreadPoolExecutor:
+        with cls._HOOK_POOL_LOCK:
+            if cls._HOOK_POOL is None:
+                cls._HOOK_POOL = ThreadPoolExecutor(
+                    max_workers=cls._HOOK_MAX_WORKERS,
+                    thread_name_prefix="roshni-after-chat",
+                )
+            return cls._HOOK_POOL
 
     # ------------------------------------------------------------------
     # Advisor / hook registration
@@ -1300,3 +1320,8 @@ class DefaultAgent(BaseAgent):
             "fallback_model": None,
             "fallback_provider": None,
         }
+    _HOOK_POOL_LOCK = threading.Lock()
+    _HOOK_POOL: ThreadPoolExecutor | None = None
+    _HOOK_MAX_WORKERS = 4
+    _HOOK_MAX_INFLIGHT = 64
+    _HOOK_SLOTS = threading.BoundedSemaphore(_HOOK_MAX_INFLIGHT)

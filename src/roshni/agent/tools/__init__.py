@@ -108,6 +108,7 @@ def create_tools(config: Config, secrets: SecretsManager) -> list[ToolDefinition
     from roshni.agent.permissions import get_domain_tier
 
     tools: list[ToolDefinition] = []
+    load_failures: list[str] = []
     integrations = config.get("integrations", {}) or {}
     permissions_cfg = config.get("permissions", {}) or {}
 
@@ -132,6 +133,7 @@ def create_tools(config: Config, secrets: SecretsManager) -> list[ToolDefinition
             tools.extend(create_task_tools(tasks_dir, task_tier, projects_dir=str(vault.projects_dir)))
         except Exception as e:
             logger.warning(f"Could not load vault/task tools: {e}")
+            load_failures.append(f"vault/tasks: {e}")
 
     # Notes tool — only when vault is not configured (superseded by vault tools)
     if not vault_path:
@@ -149,6 +151,7 @@ def create_tools(config: Config, secrets: SecretsManager) -> list[ToolDefinition
             tools.extend(create_builtin_tools())
         except Exception as e:
             logger.warning(f"Could not load builtin tools: {e}")
+            load_failures.append(f"builtins: {e}")
 
     # Delighter tools — enabled by default
     delighters_cfg = integrations.get("delighters", {}) or {}
@@ -163,6 +166,7 @@ def create_tools(config: Config, secrets: SecretsManager) -> list[ToolDefinition
             tools.extend(create_delighter_tools(reminders_path, tasks_dir=tasks_dir))
         except Exception as e:
             logger.warning(f"Could not load delighter tools: {e}")
+            load_failures.append(f"delighters: {e}")
 
     # Gmail tool — when gmail is enabled
     gmail_cfg = integrations.get("gmail", {}) or {}
@@ -174,6 +178,7 @@ def create_tools(config: Config, secrets: SecretsManager) -> list[ToolDefinition
             tools.extend(create_gmail_tools(config, secrets, tier=gmail_tier))
         except Exception as e:
             logger.warning(f"Could not load Gmail tools: {e}")
+            load_failures.append(f"gmail: {e}")
 
     # Obsidian tool — when obsidian is enabled
     obsidian_cfg = integrations.get("obsidian", {}) or {}
@@ -187,6 +192,7 @@ def create_tools(config: Config, secrets: SecretsManager) -> list[ToolDefinition
                 tools.extend(create_obsidian_tools(obs_vault_path, tier=obsidian_tier))
             except Exception as e:
                 logger.warning(f"Could not load Obsidian tools: {e}")
+                load_failures.append(f"obsidian: {e}")
 
     # Trello tool — when trello is enabled
     trello_cfg = integrations.get("trello", {}) or {}
@@ -198,6 +204,7 @@ def create_tools(config: Config, secrets: SecretsManager) -> list[ToolDefinition
             tools.extend(create_trello_tools(config, secrets, tier=trello_tier))
         except Exception as e:
             logger.warning(f"Could not load Trello tools: {e}")
+            load_failures.append(f"trello: {e}")
 
     # Notion tool — when notion is enabled
     notion_cfg = integrations.get("notion", {}) or {}
@@ -209,6 +216,7 @@ def create_tools(config: Config, secrets: SecretsManager) -> list[ToolDefinition
             tools.extend(create_notion_tools(config, secrets, tier=notion_tier))
         except Exception as e:
             logger.warning(f"Could not load Notion tools: {e}")
+            load_failures.append(f"notion: {e}")
 
     # HealthKit (Apple Health export) — when healthkit is enabled
     healthkit_cfg = integrations.get("healthkit", {}) or {}
@@ -222,6 +230,10 @@ def create_tools(config: Config, secrets: SecretsManager) -> list[ToolDefinition
                 tools.extend(create_health_tools(export_path, tier=health_tier))
             except Exception as e:
                 logger.warning(f"Could not load HealthKit tools: {e}")
+                load_failures.append(f"healthkit: {e}")
+
+    if load_failures:
+        logger.warning("Tool loader degraded; disabled integrations: " + " | ".join(load_failures))
 
     return tools
 

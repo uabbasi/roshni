@@ -84,6 +84,27 @@ class TestFromFunction:
         assert schema["function"]["name"] == "search"
         assert "query" in schema["function"]["parameters"]["properties"]
 
+    def test_zero_arg_schema_omits_parameters(self):
+        tool = ToolDefinition(
+            name="ping",
+            description="Health check",
+            parameters={"type": "object", "properties": {}},
+            function=lambda: "pong",
+        )
+        schema = tool.to_litellm_schema()
+        assert "parameters" not in schema["function"]
+
+    def test_object_schema_adds_required_when_missing(self):
+        tool = ToolDefinition(
+            name="echo",
+            description="Echo",
+            parameters={"type": "object", "properties": {"text": {"type": "string"}}},
+            function=lambda text="": text,
+        )
+        schema = tool.to_litellm_schema()
+        assert "parameters" in schema["function"]
+        assert schema["function"]["parameters"]["required"] == []
+
 
 # ------------------------------------------------------------------
 # Retry logic

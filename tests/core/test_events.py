@@ -114,6 +114,18 @@ def test_emit_sync_no_listeners():
     bus.emit_sync(Event(name="nobody.listening"))
 
 
+def test_emit_sync_runs_async_hook_without_event_loop():
+    bus = EventBus()
+    received: list[str] = []
+
+    async def async_hook(event: Event) -> None:
+        received.append(event.name)
+
+    bus.on("sync.async", async_hook)
+    bus.emit_sync(Event(name="sync.async"))
+    assert received == ["sync.async"]
+
+
 # ---------------------------------------------------------------------------
 # 6. Hook exceptions don't prevent other hooks from running
 # ---------------------------------------------------------------------------
