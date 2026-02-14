@@ -1,7 +1,7 @@
 """Tests for the task store."""
 
-from datetime import datetime, timedelta
 import threading
+from datetime import datetime, timedelta
 
 import pytest
 

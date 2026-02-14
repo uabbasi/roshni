@@ -10,6 +10,7 @@ from roshni.agent.base import ChatResult
 from roshni.agent.default import DefaultAgent
 from roshni.agent.tools import ToolDefinition
 from roshni.core.config import Config
+from roshni.core.llm.model_selector import ModelSelector, TaskSignals
 from roshni.core.secrets import SecretsManager
 
 
@@ -365,6 +366,48 @@ class TestDefaultAgentMultiProviderConfig:
         )
         agent = DefaultAgent(config=config, secrets=secrets)
         assert agent._llm.fallback_model is None
+
+    def test_mode_overrides_loaded_from_config(self, tmp_dir, secrets):
+        config = Config(
+            data_dir=tmp_dir,
+            defaults={
+                "llm": {
+                    "provider": "openai",
+                    "model": "gpt-5.2-chat-latest",
+                    "mode_overrides": {
+                        "smart": "deepseek/deepseek-chat",
+                    },
+                },
+            },
+        )
+        selector = ModelSelector(settings_path=os.path.join(tmp_dir, "selector.json"))
+        agent = DefaultAgent(config=config, secrets=secrets, model_selector=selector)
+
+        selected = agent._model_selector.select("hello", mode="smart")
+        assert selected.name == "deepseek/deepseek-chat"
+
+    def test_selector_thresholds_loaded_from_config(self, tmp_dir, secrets):
+        config = Config(
+            data_dir=tmp_dir,
+            defaults={
+                "llm": {
+                    "provider": "openai",
+                    "model": "gpt-5.2-chat-latest",
+                    "selector": {
+                        "tool_result_chars_threshold": 3000,
+                        "complex_query_chars_threshold": 300,
+                    },
+                },
+            },
+        )
+        selector = ModelSelector(settings_path=os.path.join(tmp_dir, "selector-thresholds.json"))
+        agent = DefaultAgent(config=config, secrets=secrets, model_selector=selector)
+
+        sig_result = agent._model_selector.select("hi", signals=TaskSignals(tool_result_chars=1000))
+        assert sig_result == agent._model_selector.light_model
+
+        query_result = agent._model_selector.select("x" * 200)
+        assert query_result == agent._model_selector.light_model
 
 
 class TestMessageSanitization:

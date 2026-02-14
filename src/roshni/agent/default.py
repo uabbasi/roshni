@@ -35,6 +35,8 @@ from roshni.core.events import (
     EventBus,
 )
 from roshni.core.llm.client import LLMClient
+from roshni.core.llm.config import ModelConfig as LLMModelConfig
+from roshni.core.llm.config import infer_provider
 from roshni.core.llm.model_selector import ModelSelector, TaskSignals
 from roshni.core.secrets import SecretsManager
 
@@ -167,6 +169,7 @@ class DefaultAgent(BaseAgent):
             temperature=temperature,
             max_history_messages=None,  # We manage history ourselves
         )
+        self._configure_model_selector_from_config()
 
         self.message_history: list[dict[str, Any]] = []
         self._pending_approval: dict[str, Any] | None = None
@@ -224,6 +227,62 @@ class DefaultAgent(BaseAgent):
             provider=self._llm.provider,
             agent_name=name,
         )
+
+    def _configure_model_selector_from_config(self) -> None:
+        """Apply config-driven selector tuning when a ModelSelector is provided."""
+        if not self._model_selector:
+            return
+
+        mode_overrides = self._parse_mode_overrides()
+        if mode_overrides:
+            self._model_selector.set_mode_overrides(mode_overrides)
+
+        tool_threshold = self.config.get("llm.selector.tool_result_chars_threshold", None)
+        if tool_threshold is None:
+            tool_threshold = self.config.get("llm.tool_result_chars_threshold", None)
+
+        query_threshold = self.config.get("llm.selector.complex_query_chars_threshold", None)
+        if query_threshold is None:
+            query_threshold = self.config.get("llm.complex_query_chars_threshold", None)
+
+        self._model_selector.set_thresholds(
+            tool_result_chars_threshold=tool_threshold,
+            complex_query_chars_threshold=query_threshold,
+        )
+
+    def _parse_mode_overrides(self) -> dict[str, LLMModelConfig]:
+        """Parse ``llm.mode_overrides`` config into selector-ready ModelConfig objects."""
+        raw_overrides = self.config.get("llm.mode_overrides", None)
+        if raw_overrides is None:
+            raw_overrides = self.config.get("llm.selector.mode_overrides", {})
+        if not isinstance(raw_overrides, dict):
+            return {}
+
+        parsed: dict[str, LLMModelConfig] = {}
+        for mode, model_value in raw_overrides.items():
+            if not isinstance(mode, str):
+                continue
+            model_name = str(model_value).strip()
+            if not model_name:
+                continue
+
+            matched = None
+            for model in ModelSelector.search_catalog(model_name):
+                if model.name == model_name:
+                    matched = model
+                    break
+            if matched:
+                parsed[mode] = matched
+                continue
+
+            provider = infer_provider(model_name)
+            parsed[mode] = LLMModelConfig(
+                name=model_name,
+                display_name=model_name,
+                provider=provider,
+            )
+
+        return parsed
 
     @property
     def model(self) -> str:
@@ -1320,6 +1379,7 @@ class DefaultAgent(BaseAgent):
             "fallback_model": None,
             "fallback_provider": None,
         }
+
     _HOOK_POOL_LOCK = threading.Lock()
     _HOOK_POOL: ThreadPoolExecutor | None = None
     _HOOK_MAX_WORKERS = 4

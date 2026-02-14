@@ -169,6 +169,13 @@ class TestTaskSignals:
         result = ms.select("", signals=signals)
         assert result == ms.heavy_model
 
+    def test_tool_result_threshold_is_configurable(self):
+        ms = ModelSelector(settings_path="/tmp/nonexistent_roshni_test.json", tool_result_chars_threshold=2000)
+        # Below custom threshold should stay light.
+        signals = TaskSignals(tool_result_chars=1000)
+        result = ms.select("hi", signals=signals)
+        assert result == ms.light_model
+
     def test_heavy_mode_overrides_channel_signal(self):
         """Explicit heavy_modes take priority over channel signal (after thinking check)."""
         ms = ModelSelector(settings_path="/tmp/nonexistent_roshni_test.json")
@@ -308,6 +315,21 @@ class TestPersistence:
         # Reload and verify persistence
         ms2 = ModelSelector(settings_path=path)
         assert ms2.thinking_model.name == new_thinking.name
+
+
+class TestThresholds:
+    def test_query_length_threshold_is_configurable(self):
+        ms = ModelSelector(settings_path="/tmp/nonexistent_roshni_test.json", complex_query_chars_threshold=300)
+        query = "x" * 200
+        result = ms.select(query)
+        assert result == ms.light_model
+
+    def test_set_thresholds_updates_runtime_behavior(self):
+        ms = ModelSelector(settings_path="/tmp/nonexistent_roshni_test.json")
+        ms.set_thresholds(tool_result_chars_threshold=3000)
+        signals = TaskSignals(tool_result_chars=1000)
+        result = ms.select("hi", signals=signals)
+        assert result == ms.light_model
 
 
 class TestSingleton:

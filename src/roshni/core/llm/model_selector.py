@@ -79,11 +79,15 @@ class ModelSelector:
         quiet_hours: tuple[int, int] | None = None,
         quiet_model: ModelConfig | None = None,
         mode_overrides: dict[str, ModelConfig] | None = None,
+        tool_result_chars_threshold: int = 500,
+        complex_query_chars_threshold: int = 150,
     ):
         self._settings_path = os.path.expanduser(settings_path)
         self._quiet_hours = quiet_hours
         self._quiet_model = quiet_model
         self._mode_overrides: dict[str, ModelConfig] = dict(mode_overrides) if mode_overrides else {}
+        self._tool_result_chars_threshold = max(0, int(tool_result_chars_threshold))
+        self._complex_query_chars_threshold = max(0, int(complex_query_chars_threshold))
 
         saved_light, saved_heavy, saved_thinking, saved_family = self._load_saved_settings()
         self.light_model = light_model or saved_light or self._default_light()
@@ -185,7 +189,11 @@ class ModelSelector:
             return self.light_model
 
         # Signal-based: substantial tool results, synthesis, or escalation → heavy
-        if signals and (signals.tool_result_chars > 500 or signals.needs_synthesis or signals.needs_escalation):
+        if signals and (
+            signals.tool_result_chars > self._tool_result_chars_threshold
+            or signals.needs_synthesis
+            or signals.needs_escalation
+        ):
             logger.debug(
                 f"Signal upgrade (chars={signals.tool_result_chars}, "
                 f"synthesis={signals.needs_synthesis}, escalation={signals.needs_escalation})"
@@ -204,7 +212,7 @@ class ModelSelector:
             logger.debug(f"Mode '{mode}' not in heavy/light sets, falling through to query heuristics")
 
         query_lower = query.lower()
-        if len(query) > 150 or any(kw in query_lower for kw in _COMPLEX_KEYWORDS):
+        if len(query) > self._complex_query_chars_threshold or any(kw in query_lower for kw in _COMPLEX_KEYWORDS):
             logger.debug(f"Complex query -> heavy model: {self.heavy_model.display_name}")
             return self.heavy_model
 
@@ -280,6 +288,22 @@ class ModelSelector:
             self.thinking_model = thinking
         self._active_family = self._infer_family()
         self._save_settings()
+
+    def set_mode_overrides(self, mode_overrides: dict[str, ModelConfig]) -> None:
+        """Replace mode overrides at runtime."""
+        self._mode_overrides = dict(mode_overrides)
+
+    def set_thresholds(
+        self,
+        *,
+        tool_result_chars_threshold: int | None = None,
+        complex_query_chars_threshold: int | None = None,
+    ) -> None:
+        """Update routing thresholds at runtime."""
+        if tool_result_chars_threshold is not None:
+            self._tool_result_chars_threshold = max(0, int(tool_result_chars_threshold))
+        if complex_query_chars_threshold is not None:
+            self._complex_query_chars_threshold = max(0, int(complex_query_chars_threshold))
 
     # --- persistence --------------------------------------------------------
 

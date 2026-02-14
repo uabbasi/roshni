@@ -26,6 +26,11 @@ class TestConfigSchema:
             "llm": {
                 "default": "anthropic",
                 "providers": {"anthropic": {"model": "claude-sonnet-4-5-20250929", "temperature": 0.5}},
+                "mode_overrides": {"smart": "openai/gpt-5.2-chat-latest"},
+                "selector": {
+                    "tool_result_chars_threshold": 800,
+                    "complex_query_chars_threshold": 220,
+                },
             },
             "bot": {"name": "mybot", "token": "tok-123"},
             "security": {"require_write_approval": False},
@@ -35,6 +40,8 @@ class TestConfigSchema:
         cfg = RoshniConfig.model_validate(data)
         assert cfg.paths.data_dir == Path("/tmp/test-data")
         assert cfg.llm.providers["anthropic"].model == "claude-sonnet-4-5-20250929"
+        assert cfg.llm.mode_overrides["smart"] == "openai/gpt-5.2-chat-latest"
+        assert cfg.llm.selector.tool_result_chars_threshold == 800
         assert cfg.bot.name == "mybot"
         assert cfg.security.require_write_approval is False
         assert cfg.integrations.gmail.enabled is False

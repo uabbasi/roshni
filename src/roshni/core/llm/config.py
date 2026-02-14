@@ -20,6 +20,7 @@ ANTHROPIC_OPUS_MODEL = "anthropic/claude-opus-4-20250514"
 DEEPSEEK_MODEL = "deepseek/deepseek-chat"
 XAI_MODEL = "xai/grok-4-fast-non-reasoning"
 GROQ_MODEL = "groq/llama-3.3-70b-versatile"
+KIMK2_MODEL = "openrouter/moonshotai/kimi-k2"
 
 # --- Output token limits ---
 # These are OUTPUT token limits (how many tokens the model can generate).
@@ -59,6 +60,8 @@ MODEL_OUTPUT_TOKEN_LIMITS: dict[str, int] = {
     "llama-3.3-70b": 8_192,
     "llama-3.1-8b": 8_192,
     "deepseek-r1-distill": 16_384,
+    # Kimi K2 (OpenRouter)
+    "kimi-k2": 16_384,
     # Local
     "deepseek": 8_192,
 }
@@ -70,6 +73,7 @@ PROVIDER_ENV_MAP: dict[str, str] = {
     "deepseek": "DEEPSEEK_API_KEY",
     "xai": "XAI_API_KEY",
     "groq": "GROQ_API_KEY",
+    "kimk2": "OPENROUTER_API_KEY",
 }
 
 PROVIDER_DEFAULT_LIMITS: dict[str, int] = {
@@ -79,6 +83,7 @@ PROVIDER_DEFAULT_LIMITS: dict[str, int] = {
     "deepseek": 8_192,
     "xai": 8_192,
     "groq": 8_192,
+    "kimk2": 16_384,
     "local": 8_192,
 }
 
@@ -143,8 +148,8 @@ MODEL_CATALOG: dict[str, list[ModelConfig]] = {
     ],
     "groq": [
         ModelConfig(
-            "groq/llama-4-maverick-17b-128e-instruct",
-            "Llama 4 Maverick (Groq)",
+            "groq/llama-3.3-70b-versatile",
+            "Llama 3.3 70B (Groq, Light)",
             "groq",
             False,
             False,
@@ -158,6 +163,11 @@ MODEL_CATALOG: dict[str, list[ModelConfig]] = {
     ],
     "local": [
         ModelConfig("ollama/deepseek-r1", "DeepSeek R1 (Local)", "local", False, False, 8192, "free"),
+    ],
+    "kimk2": [
+        ModelConfig("openrouter/moonshotai/kimi-k2", "Kimi K2", "kimk2", False, False, 16384, "low"),
+        ModelConfig("openrouter/moonshotai/kimi-k2", "Kimi K2 (Heavy)", "kimk2", True, False, 16384, "low"),
+        ModelConfig("openrouter/moonshotai/kimi-k2", "Kimi K2 (Thinking)", "kimk2", True, True, 16384, "low"),
     ],
 }
 
@@ -173,6 +183,9 @@ FAMILY_ALIASES: dict[str, str] = {
     "deepseek": "deepseek",
     "xai": "xai",
     "groq": "groq",
+    "kimi": "kimk2",
+    "kimi-k2": "kimk2",
+    "kimk2": "kimk2",
     "local": "local",
 }
 
@@ -204,6 +217,7 @@ def get_default_model(provider: str) -> str:
         "deepseek": DEEPSEEK_MODEL,
         "xai": XAI_MODEL,
         "groq": GROQ_MODEL,
+        "kimk2": KIMK2_MODEL,
         "local": LOCAL_MODEL,
     }
     return model_map.get(provider, OPENAI_MODEL)
@@ -239,6 +253,8 @@ def infer_provider(model_name: str) -> str:
         return "groq"
     if model_name.startswith("ollama/"):
         return "local"
+    if model_name.startswith("openrouter/") and ("kimi" in model_name.lower() or "moonshotai" in model_name.lower()):
+        return "kimk2"
     # Substring-based fallbacks
     if any(k in model_name for k in ("gpt-", "gpt-5", "o1", "o3", "o4")):
         return "openai"
@@ -248,4 +264,6 @@ def infer_provider(model_name: str) -> str:
         return "gemini"
     if "grok" in model_name:
         return "xai"
+    if "kimi" in model_name.lower():
+        return "kimk2"
     return "openai"

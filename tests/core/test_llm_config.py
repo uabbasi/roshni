@@ -23,6 +23,7 @@ class TestGetDefaultModel:
         assert "deepseek" in get_default_model("deepseek")
         assert "grok" in get_default_model("xai")
         assert "groq" in get_default_model("groq")
+        assert "kimi-k2" in get_default_model("kimk2")
 
     def test_unknown_falls_back_to_openai(self):
         assert get_default_model("unknown_provider") == get_default_model("openai")
@@ -58,6 +59,7 @@ class TestGetModelMaxTokens:
         assert get_model_max_tokens("some-unknown", provider="deepseek") == 8_192
         assert get_model_max_tokens("some-unknown", provider="xai") == 8_192
         assert get_model_max_tokens("some-unknown", provider="groq") == 8_192
+        assert get_model_max_tokens("some-unknown", provider="kimk2") == 16_384
 
 
 class TestInferProvider:
@@ -70,6 +72,7 @@ class TestInferProvider:
         assert infer_provider("deepseek/deepseek-chat") == "deepseek"
         assert infer_provider("xai/grok-2") == "xai"
         assert infer_provider("groq/llama-3.3-70b-versatile") == "groq"
+        assert infer_provider("openrouter/moonshotai/kimi-k2") == "kimk2"
 
     def test_openai_models(self):
         assert infer_provider("gpt-4o") == "openai"
@@ -90,10 +93,15 @@ class TestInferProvider:
     def test_default_openai(self):
         assert infer_provider("some-random-model") == "openai"
 
+    def test_kimi_aliases(self):
+        assert infer_provider("moonshotai/kimi-k2") == "kimk2"
+        assert infer_provider("kimi-k2") == "kimk2"
+
 
 class TestModelCatalog:
     def test_all_providers_present(self):
-        assert set(MODEL_CATALOG.keys()) >= {"anthropic", "openai", "gemini", "deepseek", "xai", "groq", "local"}
+        expected = {"anthropic", "openai", "gemini", "deepseek", "xai", "groq", "kimk2", "local"}
+        assert set(MODEL_CATALOG.keys()) >= expected
 
     def test_entries_are_model_config(self):
         for models in MODEL_CATALOG.values():
@@ -129,10 +137,15 @@ class TestModelCatalog:
         assert "xai/grok-4-fast-non-reasoning" in names
         assert "xai/grok-4-fast-reasoning" in names
 
-    def test_llama4_in_catalog(self):
+    def test_groq_default_family_models_in_catalog(self):
         groq_models = MODEL_CATALOG["groq"]
         names = [m.name for m in groq_models]
-        assert "groq/llama-4-maverick-17b-128e-instruct" in names
+        assert "groq/llama-3.3-70b-versatile" in names
+
+    def test_kimi_k2_in_catalog(self):
+        kimk2_models = MODEL_CATALOG["kimk2"]
+        names = [m.name for m in kimk2_models]
+        assert "openrouter/moonshotai/kimi-k2" in names
 
     def test_deepseek_reasoner_is_thinking(self):
         deepseek_models = MODEL_CATALOG["deepseek"]
@@ -179,7 +192,7 @@ class TestNewModelConstants:
 
 class TestProviderEnvMap:
     def test_all_cloud_providers_mapped(self):
-        for provider in ("anthropic", "openai", "gemini", "deepseek", "xai", "groq"):
+        for provider in ("anthropic", "openai", "gemini", "deepseek", "xai", "groq", "kimk2"):
             assert provider in PROVIDER_ENV_MAP
             assert PROVIDER_ENV_MAP[provider].endswith("_API_KEY")
 

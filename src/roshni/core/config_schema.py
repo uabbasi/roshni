@@ -40,6 +40,14 @@ class LLMProviderConfig(BaseModel):
     timeout: int = 60
 
 
+class LLMSelectorConfig(BaseModel):
+    """Selector tuning knobs for model routing heuristics."""
+
+    tool_result_chars_threshold: int = 500
+    complex_query_chars_threshold: int = 150
+    mode_overrides: dict[str, str] = {}
+
+
 class LLMConfig(BaseModel):
     """Top-level LLM configuration."""
 
@@ -48,6 +56,8 @@ class LLMConfig(BaseModel):
     default: str = "anthropic"
     fallback: str | None = None
     providers: dict[str, LLMProviderConfig] = {}
+    mode_overrides: dict[str, str] = {}
+    selector: LLMSelectorConfig = LLMSelectorConfig()
     daily_budget: float | None = None
 
     @model_validator(mode="after")
