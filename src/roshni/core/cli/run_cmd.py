@@ -43,14 +43,58 @@ def run() -> None:
         click.echo("Telegram support not installed. Run: pip install 'roshni[bot]'")
         return
 
-    gateway = TelegramGateway(
+    scheduler_enabled = config.get("scheduler.enabled", False)
+
+    if scheduler_enabled:
+        asyncio.run(_run_with_scheduler(agent, bot_token, allowed_ids, config))
+    else:
+        gateway = TelegramGateway(
+            agent=agent,
+            bot_token=bot_token,
+            allowed_user_ids=allowed_ids,
+        )
+        bot_name = config.get("bot.name", "Roshni")
+        click.echo(f"Starting {bot_name} on Telegram...")
+        click.echo("Press Ctrl+C to stop.\n")
+        asyncio.run(gateway.start())
+
+
+async def _run_with_scheduler(agent, bot_token, allowed_ids, config) -> None:  # type: ignore[no-untyped-def]
+    """Start EventGateway + Scheduler + TelegramGateway wired together."""
+    from roshni.gateway.event_gateway import EventGateway
+    from roshni.gateway.plugins.telegram.bot import TelegramGateway
+    from roshni.gateway.scheduler import GatewayScheduler
+
+    # Build the event gateway
+    event_gw = EventGateway(agent=agent)
+    event_gw.start()
+
+    # Build the Telegram gateway with event routing
+    telegram_gw = TelegramGateway(
         agent=agent,
         bot_token=bot_token,
         allowed_user_ids=allowed_ids,
+        event_gateway=event_gw,
     )
 
+    # Wire response handler: heartbeat/scheduled responses go to Telegram
+    async def _send_response(event, response: str) -> None:  # type: ignore[no-untyped-def]
+        if response and response.strip():
+            await telegram_gw.send_proactive(response)
+
+    event_gw.set_response_handler(_send_response)
+
+    # Build and start scheduler
+    scheduler = GatewayScheduler(submit_fn=event_gw.submit)
+    scheduler.add_jobs_from_config(config)
+    scheduler.start()
+
     bot_name = config.get("bot.name", "Roshni")
-    click.echo(f"Starting {bot_name} on Telegram...")
+    click.echo(f"Starting {bot_name} on Telegram with scheduler...")
     click.echo("Press Ctrl+C to stop.\n")
 
-    asyncio.run(gateway.start())
+    try:
+        await telegram_gw.start()
+    finally:
+        scheduler.shutdown()
+        await event_gw.stop()

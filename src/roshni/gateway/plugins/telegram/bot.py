@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import re
 from html import escape as html_escape
+from typing import Any
 
 from loguru import logger
 
@@ -104,6 +105,10 @@ class TelegramGateway(BotGateway):
 
     Uses python-telegram-bot to receive messages and route them
     through a BaseAgent.
+
+    When ``event_gateway`` is provided, incoming messages are routed
+    through the event queue for serialized processing instead of
+    calling the agent directly.
     """
 
     def __init__(
@@ -111,10 +116,12 @@ class TelegramGateway(BotGateway):
         agent: BaseAgent,
         bot_token: str,
         allowed_user_ids: list[str | int] | None = None,
+        event_gateway: Any | None = None,
     ):
         self.agent = agent
         self.bot_token = bot_token
         self.allowed_user_ids: set[int] = {int(uid) for uid in (allowed_user_ids or [])}
+        self._event_gateway = event_gateway
         self._app = None
 
     def _is_authorized(self, user_id: int) -> bool:
@@ -275,8 +282,42 @@ class TelegramGateway(BotGateway):
         await self.stop()
 
     async def handle_message(self, message: str, user_id: str) -> str:
-        """Route a message through the agent."""
+        """Route a message through the agent (or event gateway if wired)."""
+        if self._event_gateway:
+            from roshni.gateway.events import GatewayEvent
+
+            event = GatewayEvent.message(message, user_id=user_id, channel="telegram")
+            await self._event_gateway.submit(event)
+            return await event._response_future
         return await self.agent.invoke(message)
+
+    async def send_proactive(self, text: str, user_id: int | str | None = None) -> None:
+        """Send an unsolicited message (e.g. heartbeat response) to a user.
+
+        If ``user_id`` is ``None``, sends to the first user in the allowlist
+        (typical for single-user bots).
+        """
+        if not self._app or not self._app.bot:
+            logger.warning("Cannot send proactive message — bot not started")
+            return
+
+        if user_id is None:
+            if not self.allowed_user_ids:
+                logger.warning("No allowed users configured — cannot send proactive message")
+                return
+            user_id = next(iter(self.allowed_user_ids))
+
+        chat_id = int(user_id)
+        html_text = _md_to_html(text)
+        chunks = _split_message(html_text)
+        for chunk in chunks:
+            try:
+                await self._app.bot.send_message(chat_id=chat_id, text=chunk, parse_mode="HTML")
+            except Exception:
+                try:
+                    await self._app.bot.send_message(chat_id=chat_id, text=chunk)
+                except Exception:
+                    logger.exception(f"Failed to send proactive message to {chat_id}")
 
     async def stop(self) -> None:
         """Stop the bot gracefully."""
