@@ -54,7 +54,16 @@ def filter_tools_by_tier(
     tools: list[ToolDefinition],
     tier: PermissionTier,
 ) -> list[ToolDefinition]:
-    """Return only the tools whose permission level fits within *tier*."""
+    """Return only the tools whose permission level fits within *tier*.
+
+    When the tier already authorises a tool's permission level and the tool
+    has no explicit ``requires_approval`` override, approval is skipped —
+    the tier IS the trust decision.
+    """
     if tier == PermissionTier.NONE:
         return []
-    return [t for t in tools if _PERMISSION_MIN_TIER.get(t.permission, 3) <= tier]
+    filtered = [t for t in tools if _PERMISSION_MIN_TIER.get(t.permission, 3) <= tier]
+    for t in filtered:
+        if t.requires_approval is None and _PERMISSION_MIN_TIER.get(t.permission, 3) <= tier:
+            t.requires_approval = False
+    return filtered

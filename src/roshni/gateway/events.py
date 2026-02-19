@@ -47,7 +47,7 @@ class GatewayEvent:
     """
 
     source: EventSource
-    message: str
+    message: str | list
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     timestamp: float = field(default_factory=time.time)
     priority: EventPriority = EventPriority.NORMAL
@@ -69,7 +69,7 @@ class GatewayEvent:
     @classmethod
     def message(
         cls,
-        text: str,
+        text: str | list,
         user_id: str,
         channel: str | None = None,
         *,

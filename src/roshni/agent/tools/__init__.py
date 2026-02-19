@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time as _time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -14,6 +15,35 @@ from roshni.core.config import Config
 from roshni.core.secrets import SecretsManager
 
 _TRANSIENT_ERRORS = (ConnectionError, TimeoutError, OSError)
+
+
+def _sanitize_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Make a Pydantic V2 JSON schema compatible with Gemini function calling.
+
+    Pydantic emits ``anyOf: [{"type": "X"}, {"type": "null"}]`` for Optional
+    fields.  Gemini rejects ``anyOf``, so we flatten it to ``{"type": "X"}``,
+    merging sibling keys (description, default, etc.).  We also drop
+    ``"default": None`` (LLMs treat omission as null already) and recurse into
+    nested structures.
+    """
+    if "anyOf" in schema:
+        non_null = [v for v in schema["anyOf"] if v.get("type") != "null"]
+        if non_null:
+            merged = {k: v for k, v in schema.items() if k != "anyOf"}
+            merged.update(non_null[0])
+            schema = merged
+
+    if schema.get("default") is None:
+        schema.pop("default", None)
+
+    # Recurse into sub-schemas
+    if "properties" in schema:
+        schema["properties"] = {k: _sanitize_schema(v) for k, v in schema["properties"].items()}
+    for key in ("items", "additionalProperties"):
+        if key in schema and isinstance(schema[key], dict):
+            schema[key] = _sanitize_schema(schema[key])
+
+    return schema
 
 
 @dataclass
@@ -47,6 +77,7 @@ class ToolDefinition:
         schema.pop("$defs", None)
         for prop in schema.get("properties", {}).values():
             prop.pop("title", None)
+        schema = _sanitize_schema(schema)
         return cls(
             name=name,
             description=description,
@@ -231,6 +262,54 @@ def create_tools(config: Config, secrets: SecretsManager) -> list[ToolDefinition
             except Exception as e:
                 logger.warning(f"Could not load HealthKit tools: {e}")
                 load_failures.append(f"healthkit: {e}")
+
+    # Workflow tools — long-running agentic project execution
+    workflow_cfg = config.get("workflow", {}) or {}
+    if workflow_cfg.get("enabled"):
+        try:
+            from roshni.agent.workflow import ProjectStore, create_workflow_tools
+            from roshni.agent.workflow.orchestrator import Orchestrator
+            from roshni.agent.workflow.worker import WorkerPool
+
+            data_dir = config.get("paths.data_dir", "~/.weeklies-data")
+            projects_dir = os.path.expanduser(f"{data_dir}/projects")
+            obsidian_cfg = integrations.get("obsidian", {}) or {}
+            obsidian_projects = ""
+            if obsidian_cfg.get("enabled") and obsidian_cfg.get("vault_path"):
+                obsidian_projects = os.path.join(
+                    os.path.expanduser(obsidian_cfg["vault_path"]),
+                    vault_cfg.get("agent_dir", "hakim"),
+                    "projects",
+                )
+
+            wf_store = ProjectStore(projects_dir, obsidian_projects)
+            wf_backend = wf_store.backend
+
+            max_workers = workflow_cfg.get("max_concurrent_workers", 3)
+
+            # ModelSelector and EventBus are resolved at agent construction time
+            # so we pass None here — they'll be wired at the app level
+            wf_worker_pool = WorkerPool(
+                config,
+                secrets,
+                tools,
+                None,
+                wf_backend,
+                max_concurrent=max_workers,
+            )
+            wf_orchestrator = Orchestrator(
+                config,
+                secrets,
+                wf_store,
+                wf_backend,
+                worker_pool=wf_worker_pool,
+                all_tools=tools,
+            )
+
+            tools.extend(create_workflow_tools(wf_store, wf_orchestrator))
+        except Exception as e:
+            logger.warning(f"Could not load workflow tools: {e}")
+            load_failures.append(f"workflow: {e}")
 
     if load_failures:
         logger.warning("Tool loader degraded; disabled integrations: " + " | ".join(load_failures))

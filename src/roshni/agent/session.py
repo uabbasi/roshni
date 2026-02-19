@@ -172,6 +172,7 @@ class JSONLSessionStore:
 
     @staticmethod
     def _append_unlocked(path: Path, data: dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "a") as f:
             f.write(json.dumps(data, ensure_ascii=False) + "\n")
 
