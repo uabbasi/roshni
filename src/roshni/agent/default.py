@@ -705,7 +705,11 @@ class DefaultAgent(BaseAgent):
                             ],
                         }
                         return  # Caller checks _pending_approval
-                    result = tool.execute(fn_args)
+                    try:
+                        result = tool.execute(fn_args)
+                    except Exception as exc:
+                        logger.error(f"Tool {fn_name} raised {type(exc).__name__}: {exc}")
+                        result = f"Tool execution failed: {type(exc).__name__}: {exc}"
                 else:
                     result = f"Unknown tool: {fn_name}"
 
@@ -777,6 +781,13 @@ class DefaultAgent(BaseAgent):
                 history = list(self.message_history[turn_start:])
             else:
                 history = list(self.message_history)
+            # Same sanitization as the full path — minimal mode is used by
+            # _synthesize_response which runs right after tool calls.
+            while history and history[0].get("role") in ("tool",):
+                history.pop(0)
+            while history and history[0].get("role") == "assistant" and history[0].get("tool_calls"):
+                history.pop(0)
+            history = self._repair_tool_sequences(history)
             messages.extend(history)
             for msg in messages:
                 if msg.get("content") is None:
@@ -839,6 +850,11 @@ class DefaultAgent(BaseAgent):
                 break
             history.pop(0)
 
+        # Sanitize: ensure every assistant+tool_calls has contiguous, complete
+        # tool results.  Covers edge cases from history trim, compression,
+        # process restarts, or approval flow that left orphaned tool_calls.
+        history = self._repair_tool_sequences(history)
+
         messages.extend(history)
 
         # Final pass: ensure every message has string content.
@@ -849,6 +865,76 @@ class DefaultAgent(BaseAgent):
                 msg["content"] = ""
 
         return messages
+
+    # ------------------------------------------------------------------
+    # Tool-sequence repair
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _repair_tool_sequences(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Ensure every assistant+tool_calls has contiguous, complete tool results.
+
+        The OpenAI API rejects conversations where an assistant message with
+        ``tool_calls`` is not immediately followed by ``tool`` result messages
+        for each ``tool_call_id``.  This can break after:
+
+        * History trimming / compression splitting a tool sequence
+        * A process restart between an approval prompt and the user's response
+        * A user message accidentally inserted between tool_calls and results
+
+        This method relocates scattered tool results to sit right after their
+        owning assistant message, and injects synthetic results for any that
+        are missing entirely.
+        """
+        # Index tool results by their tool_call_id
+        tool_result_by_id: dict[str, dict[str, Any]] = {}
+        for msg in messages:
+            if msg.get("role") == "tool" and msg.get("tool_call_id"):
+                tool_result_by_id[msg["tool_call_id"]] = msg
+
+        # Collect all tool_call_ids that are "owned" by an assistant message
+        owned_ids: set[str] = set()
+        for msg in messages:
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                for tc in msg["tool_calls"]:
+                    owned_ids.add(tc["id"])
+
+        if not owned_ids:
+            return messages  # Nothing to repair
+
+        # Rebuild: place each assistant's tool results right after it
+        repaired: list[dict[str, Any]] = []
+        injected = 0
+
+        for msg in messages:
+            # Skip owned tool results from their original position —
+            # they'll be re-placed after their assistant message.
+            if msg.get("role") == "tool" and msg.get("tool_call_id") in owned_ids:
+                continue
+
+            repaired.append(msg)
+
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                for tc in msg["tool_calls"]:
+                    tc_id = tc["id"]
+                    if tc_id in tool_result_by_id:
+                        repaired.append(tool_result_by_id[tc_id])
+                    else:
+                        # Missing result — inject a synthetic one
+                        name = tc.get("function", {}).get("name", "unknown")
+                        repaired.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tc_id,
+                                "content": f"[Result unavailable — {name} was interrupted]",
+                            }
+                        )
+                        injected += 1
+
+        if injected:
+            logger.warning(f"Injected {injected} synthetic tool result(s) for orphaned tool_calls")
+
+        return repaired
 
     # ------------------------------------------------------------------
     # Content normalization
@@ -997,10 +1083,12 @@ class DefaultAgent(BaseAgent):
             selected_model = config.name
             self._last_selected_model_config = config
 
-        self.message_history.append(
+        # Build messages WITHOUT appending the synthesis prompt to history —
+        # it's a transient instruction, not a real user turn.
+        messages = self._build_messages(prompt_mode="minimal")
+        messages.append(
             {"role": "user", "content": "Based on all the tool results above, provide a complete written response."}
         )
-        messages = self._build_messages(prompt_mode="minimal")
         try:
             response = self._llm.completion(messages, model=selected_model)
             text = response.choices[0].message.content or ""
@@ -1116,8 +1204,15 @@ class DefaultAgent(BaseAgent):
         if summary:
             compressed.append({"role": "user", "content": f"[CONVERSATION SUMMARY]\n{summary}"})
 
-        # Keep last 4 messages
-        compressed.extend(history[-4:])
+        # Keep last 4 messages, but don't split a tool sequence.
+        keep_start = len(history) - 4
+        # Walk backward if we'd start on an orphaned tool result
+        while keep_start > 0 and history[keep_start].get("role") == "tool":
+            keep_start -= 1
+        # If we landed on an assistant+tool_calls, include it too
+        if keep_start > 0 and history[keep_start].get("role") == "assistant" and history[keep_start].get("tool_calls"):
+            pass  # keep_start already includes the assistant message
+        compressed.extend(history[keep_start:])
         self.message_history = compressed
 
     def _summarize_old_messages(self, messages: list[dict[str, Any]]) -> str:
@@ -1217,9 +1312,24 @@ class DefaultAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     def _trim_history(self) -> None:
-        """Keep history within bounds."""
-        if self.max_history_messages and len(self.message_history) > self.max_history_messages * 2:
-            self.message_history = self.message_history[-self.max_history_messages :]
+        """Keep history within bounds, respecting tool-sequence boundaries."""
+        if not self.max_history_messages or len(self.message_history) <= self.max_history_messages * 2:
+            return
+        cut = len(self.message_history) - self.max_history_messages
+        # Don't cut in the middle of an assistant+tool_calls sequence —
+        # walk forward past any orphaned tool results and the owning assistant.
+        while cut < len(self.message_history) and self.message_history[cut].get("role") == "tool":
+            cut += 1
+        if (
+            cut < len(self.message_history)
+            and self.message_history[cut].get("role") == "assistant"
+            and self.message_history[cut].get("tool_calls")
+        ):
+            # This assistant has tool_calls — skip past it and its tool results
+            cut += 1
+            while cut < len(self.message_history) and self.message_history[cut].get("role") == "tool":
+                cut += 1
+        self.message_history = self.message_history[cut:]
 
     # ------------------------------------------------------------------
     # Approval workflow
@@ -1279,7 +1389,10 @@ class DefaultAgent(BaseAgent):
         tool_call_id = self._pending_approval["tool_call_id"]
         remaining = self._pending_approval.get("remaining_tool_calls", [])
 
-        self.message_history.append({"role": "user", "content": message})
+        # NOTE: Do NOT append user message here — for approve/deny the message
+        # would land between the assistant's tool_calls and their results,
+        # violating the OpenAI requirement that tool results be contiguous.
+        # The user message is only appended for unrecognised input (re-prompt).
 
         if decision == "approve":
             # Execute the approved tool and add proper tool-result message
@@ -1319,7 +1432,9 @@ class DefaultAgent(BaseAgent):
             self._pending_approval = None
             return None  # Signal chat() to resume — LLM will see the errors
 
-        # Unrecognised input — re-prompt
+        # Unrecognised input — re-prompt (safe to append user message here
+        # since the LLM is not called with this history until approval resolves)
+        self.message_history.append({"role": "user", "content": message})
         prompt = self._build_approval_prompt(tool_name, parsed_args)
         self.message_history.append({"role": "assistant", "content": prompt})
         self._trim_history()

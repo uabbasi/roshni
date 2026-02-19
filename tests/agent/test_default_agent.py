@@ -138,6 +138,44 @@ class TestDefaultAgentChat:
         assert result.tool_calls[0]["name"] == "echo"
         assert result.tool_calls[0]["result"] == "Echo: hello"
 
+    @patch("roshni.core.llm.client.LLMClient.completion")
+    def test_tool_exception_produces_error_result(self, mock_completion, config, secrets):
+        """If a tool raises, the error is captured as a tool result — not an orphaned tool_call."""
+
+        def exploding_fn(text):
+            raise RuntimeError("kaboom")
+
+        boom_tool = ToolDefinition(
+            name="boom",
+            description="Explodes",
+            parameters={"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
+            function=exploding_fn,
+        )
+
+        tool_call = MagicMock()
+        tool_call.id = "call_boom"
+        tool_call.function.name = "boom"
+        tool_call.function.arguments = '{"text": "hi"}'
+
+        mock_completion.side_effect = [
+            _make_response(None, tool_calls=[tool_call]),
+            _make_response("The tool failed, sorry."),
+        ]
+
+        agent = DefaultAgent(config=config, secrets=secrets, tools=[boom_tool])
+        result = agent.chat("try the boom tool")
+
+        # Should NOT crash — the error is returned as a tool result to the LLM
+        assert "went wrong" not in result.text.lower()
+        assert len(result.tool_calls) == 1
+        assert "kaboom" in result.tool_calls[0]["result"]
+
+        # History should be valid: assistant+tool_calls has a matching tool result
+        messages = agent._build_messages()
+        for i, msg in enumerate(messages):
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                assert i + 1 < len(messages) and messages[i + 1]["role"] == "tool"
+
     def test_clear_history(self, config, secrets):
         agent = DefaultAgent(config=config, secrets=secrets)
         agent.message_history.append({"role": "user", "content": "test"})
@@ -608,6 +646,93 @@ class TestMessageSanitization:
 
         messages = agent._build_messages()
         assert self._all_messages_have_string_content(messages)
+
+    def test_repair_injects_missing_tool_results(self, config, secrets):
+        """If tool results are missing (e.g. from history trim), synthetic results are injected."""
+        agent = DefaultAgent(config=config, secrets=secrets, max_history_messages=20)
+
+        agent.message_history = [
+            {"role": "user", "content": "do something"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "c1", "type": "function", "function": {"name": "save_note", "arguments": "{}"}},
+                    {"id": "c2", "type": "function", "function": {"name": "echo", "arguments": "{}"}},
+                ],
+            },
+            # Only c1 has a result — c2 is missing (e.g. process crashed mid-execution)
+            {"role": "tool", "tool_call_id": "c1", "content": "saved"},
+            {"role": "user", "content": "what happened?"},
+        ]
+
+        messages = agent._build_messages()
+        non_system = [m for m in messages if m["role"] != "system"]
+
+        # Both tool results should be present after the assistant message
+        tool_msgs = [m for m in non_system if m["role"] == "tool"]
+        assert len(tool_msgs) == 2
+        tool_ids = {m["tool_call_id"] for m in tool_msgs}
+        assert tool_ids == {"c1", "c2"}
+        # The synthetic result should mention the tool name
+        c2_msg = next(m for m in tool_msgs if m["tool_call_id"] == "c2")
+        assert "echo" in c2_msg["content"]
+        assert "unavailable" in c2_msg["content"].lower() or "interrupted" in c2_msg["content"].lower()
+
+    def test_repair_reorders_scattered_tool_results(self, config, secrets):
+        """Tool results separated by a user message are reordered to be contiguous."""
+        agent = DefaultAgent(config=config, secrets=secrets, max_history_messages=20)
+
+        # This simulates the old approval bug: user message lands between tool_calls and results
+        agent.message_history = [
+            {"role": "user", "content": "cancel the project"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "c1", "type": "function", "function": {"name": "cancel_project", "arguments": "{}"}},
+                ],
+            },
+            {"role": "user", "content": "approve"},  # breaks contiguity
+            {"role": "tool", "tool_call_id": "c1", "content": "Project cancelled."},
+            {"role": "assistant", "content": "Done, project cancelled."},
+        ]
+
+        messages = agent._build_messages()
+        non_system = [m for m in messages if m["role"] != "system"]
+
+        # The tool result should be right after the assistant+tool_calls (contiguous)
+        assistant_idx = next(i for i, m in enumerate(non_system) if m.get("tool_calls"))
+        assert non_system[assistant_idx + 1]["role"] == "tool"
+        assert non_system[assistant_idx + 1]["tool_call_id"] == "c1"
+        assert self._no_orphaned_tool_messages(messages)
+
+    @patch("roshni.core.llm.client.LLMClient.completion")
+    def test_approval_no_user_message_between_tool_calls(self, mock_completion, config, secrets, write_tool):
+        """Approving a tool must NOT insert the user message between tool_calls and results."""
+        tool_call = MagicMock()
+        tool_call.id = "call_approve_test"
+        tool_call.function.name = "write_thing"
+        tool_call.function.arguments = '{"text": "test"}'
+        mock_completion.return_value = _make_response(None, tool_calls=[tool_call])
+
+        agent = DefaultAgent(config=config, secrets=secrets, tools=[write_tool])
+        agent.chat("write test")  # triggers approval prompt
+
+        # Now approve
+        mock_completion.return_value = _make_response("Written!")
+        agent.chat("approve")
+
+        # Check that no user message sits between assistant+tool_calls and tool result
+        history = agent.message_history
+        for i, msg in enumerate(history):
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                # Next message must be a tool result, not a user message
+                if i + 1 < len(history):
+                    assert history[i + 1]["role"] == "tool", (
+                        f"Expected tool result after assistant+tool_calls, "
+                        f"got {history[i + 1]['role']}: {history[i + 1].get('content', '')[:50]}"
+                    )
 
     @patch("roshni.core.llm.client.LLMClient.completion")
     def test_prior_turn_tool_calls_dont_corrupt_next_turn(self, mock_completion, config, secrets, echo_tool):
