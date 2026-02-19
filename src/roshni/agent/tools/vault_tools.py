@@ -14,23 +14,43 @@ from roshni.agent.vault import VaultManager
 _vault_write_lock = threading.Lock()
 
 
+def _discover_entries(directory: str) -> list[tuple[str, str]]:
+    """Discover markdown entries supporting both flat files and subdirectories.
+
+    Returns (slug, filepath) pairs sorted by slug. Handles two layouts:
+      - Flat:  directory/my-entry.md         → slug="my-entry"
+      - Subdir: directory/my-entry/SKILL.md  → slug="my-entry" (any .md inside)
+    """
+    if not os.path.isdir(directory):
+        return []
+    entries: list[tuple[str, str]] = []
+    for item in os.listdir(directory):
+        full = os.path.join(directory, item)
+        if item.endswith(".md") and os.path.isfile(full):
+            entries.append((item[:-3], full))
+        elif os.path.isdir(full):
+            # Look for a .md file inside the subdirectory
+            md_files = sorted(
+                f for f in os.listdir(full) if f.endswith(".md") and os.path.isfile(os.path.join(full, f))
+            )
+            if md_files:
+                entries.append((item, os.path.join(full, md_files[0])))
+    return sorted(entries, key=lambda e: e[0])
+
+
 def _list_md_files(directory: str) -> str:
     """List .md files in a directory with updated timestamps from frontmatter."""
-    if not os.path.isdir(directory):
+    entries = _discover_entries(directory)
+    if not entries:
         return "No entries found."
-    files = sorted(f for f in os.listdir(directory) if f.endswith(".md"))
-    if not files:
-        return "No entries found."
-    entries: list[str] = []
-    for f in files:
-        slug = f[:-3]
-        path = os.path.join(directory, f)
+    lines: list[str] = []
+    for slug, path in entries:
         updated = _get_frontmatter_field(path, "updated")
         if updated:
-            entries.append(f"- {slug} (updated {updated})")
+            lines.append(f"- {slug} (updated {updated})")
         else:
-            entries.append(f"- {slug}")
-    return "\n".join(entries)
+            lines.append(f"- {slug}")
+    return "\n".join(lines)
 
 
 def _get_frontmatter_field(path: str, key: str) -> str | None:
@@ -59,23 +79,43 @@ def _update_frontmatter_field(content: str, key: str, value: str) -> str:
 
 
 def _resolve_slug(directory: str, name: str) -> str | None:
-    """Resolve a name to an existing file slug. Exact match first, then substring."""
-    if not os.path.isdir(directory):
+    """Resolve a name to an existing entry slug. Exact match first, then substring."""
+    entries = _discover_entries(directory)
+    if not entries:
         return None
     slug = name.lower().replace(" ", "-")
     # Exact match
-    if os.path.isfile(os.path.join(directory, f"{slug}.md")):
-        return slug
+    for entry_slug, _ in entries:
+        if entry_slug == slug:
+            return entry_slug
     # Substring scan
-    files = sorted(f for f in os.listdir(directory) if f.endswith(".md"))
-    for f in files:
-        if slug in f[:-3]:
-            return f[:-3]
+    for entry_slug, _ in entries:
+        if slug in entry_slug:
+            return entry_slug
+    return None
+
+
+def _resolve_path(directory: str, name: str) -> str | None:
+    """Resolve a name to its file path. Supports flat files and subdirectories."""
+    entries = _discover_entries(directory)
+    slug = name.lower().replace(" ", "-")
+    for entry_slug, path in entries:
+        if entry_slug == slug:
+            return path
+    for entry_slug, path in entries:
+        if slug in entry_slug:
+            return path
     return None
 
 
 def _read_md_file(directory: str, name: str) -> str:
     """Read a .md file by exact name (without extension)."""
+    # Try discovery first (handles subdirectory layout)
+    for entry_slug, path in _discover_entries(directory):
+        if entry_slug == name:
+            with open(path, encoding="utf-8") as f:
+                return f.read()
+    # Fall back to flat file
     path = os.path.join(directory, f"{name}.md")
     if not os.path.isfile(path):
         return f"Not found: {name}"
