@@ -15,8 +15,8 @@ GOOGLE_MODEL = "gemini/gemini-2.5-flash"
 GOOGLE_PRO_MODEL = "gemini/gemini-3-pro-preview"
 GOOGLE_FLASH_MODEL = "gemini/gemini-3-flash-preview"
 OPENAI_MODEL = "gpt-5.2-chat-latest"
-ANTHROPIC_MODEL = "anthropic/claude-sonnet-4-20250514"
-ANTHROPIC_OPUS_MODEL = "anthropic/claude-opus-4-20250514"
+ANTHROPIC_MODEL = "anthropic/claude-sonnet-4-6"
+ANTHROPIC_OPUS_MODEL = "anthropic/claude-opus-4-6-20260205"
 DEEPSEEK_MODEL = "deepseek/deepseek-chat"
 XAI_MODEL = "xai/grok-4-fast-non-reasoning"
 GROQ_MODEL = "groq/llama-3.3-70b-versatile"
@@ -35,7 +35,10 @@ MODEL_OUTPUT_TOKEN_LIMITS: dict[str, int] = {
     "gpt-4o": 16_384,
     "gpt-4": 4_096,
     "gpt-5": 16_384,
-    # Anthropic
+    # Anthropic (4.6 supports 128K/64K output; cap at reasonable defaults)
+    "claude-opus-4-6": 16_384,
+    "claude-sonnet-4-6": 16_384,
+    "claude-sonnet-4-5": 16_384,
     "claude-opus-4": 8_192,
     "claude-sonnet-4": 8_192,
     "claude-haiku-4": 8_192,
@@ -122,9 +125,9 @@ class ModelConfig:
 # Model catalog with light, heavy, and thinking options per provider.
 MODEL_CATALOG: dict[str, list[ModelConfig]] = {
     "anthropic": [
-        ModelConfig("anthropic/claude-haiku-4", "Claude Haiku 4", "anthropic", False, False, 8192, "low"),
-        ModelConfig("anthropic/claude-sonnet-4-20250514", "Claude Sonnet 4", "anthropic", True, False, 8192, "medium"),
-        ModelConfig("anthropic/claude-opus-4-20250514", "Claude Opus 4", "anthropic", True, True, 8192, "high"),
+        ModelConfig("anthropic/claude-haiku-4-5-20251001", "Claude Haiku 4.5", "anthropic", False, False, 8192, "low"),
+        ModelConfig("anthropic/claude-sonnet-4-6", "Claude Sonnet 4.6", "anthropic", True, False, 16384, "medium"),
+        ModelConfig("anthropic/claude-opus-4-6-20260205", "Claude Opus 4.6", "anthropic", True, True, 16384, "high"),
     ],
     "openai": [
         ModelConfig("gpt-5.2-chat-latest", "GPT-5.2 Chat", "openai", False, False, 16384, "medium"),

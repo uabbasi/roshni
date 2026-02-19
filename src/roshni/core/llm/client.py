@@ -23,7 +23,7 @@ class LLMClient:
 
     Model names follow litellm conventions:
       - OpenAI:    ``"gpt-4o"``, ``"o3"``
-      - Anthropic: ``"anthropic/claude-sonnet-4-20250514"``
+      - Anthropic: ``"anthropic/claude-sonnet-4-6"``
       - Gemini:    ``"gemini/gemini-2.5-flash"``
       - Local:     ``"ollama/deepseek-r1"``
     """
@@ -137,16 +137,34 @@ class LLMClient:
         kwargs = self._build_completion_kwargs(messages, tools=tools, stop=stop, model=model, thinking=thinking)
         active_profile_name = self._inject_active_auth_profile(kwargs)
 
+        # Errors that should trigger cross-provider fallback
+        _fallback_errors = (
+            litellm.RateLimitError,
+            litellm.APIError,
+            litellm.APIConnectionError,
+            litellm.ServiceUnavailableError,
+            litellm.NotFoundError,
+            litellm.InternalServerError,
+        )
+        # Subset where rotating API keys might help (not model-not-found)
+        _rotation_errors = (
+            litellm.RateLimitError,
+            litellm.APIError,
+            litellm.APIConnectionError,
+            litellm.ServiceUnavailableError,
+            litellm.InternalServerError,
+        )
+
         try:
             response = self._completion_with_recovery(kwargs, litellm=litellm)
             self._record_response_usage(response)
             return response
         except Exception as e:
-            if not isinstance(e, (litellm.RateLimitError, litellm.APIError, litellm.APIConnectionError)):
+            if not isinstance(e, _fallback_errors):
                 raise
 
             # Try auth profile rotation before falling back to a different model
-            if self._auth_profile_manager:
+            if self._auth_profile_manager and isinstance(e, _rotation_errors):
                 if active_profile_name:
                     self._auth_profile_manager.mark_failed(active_profile_name)
                 while next_profile := self._auth_profile_manager.rotate():
@@ -158,7 +176,7 @@ class LLMClient:
                         self._auth_profile_manager.mark_success(next_profile.name)
                         self._record_response_usage(response)
                         return response
-                    except (litellm.RateLimitError, litellm.APIError, litellm.APIConnectionError):
+                    except _rotation_errors:
                         self._auth_profile_manager.mark_failed(next_profile.name)
             if self.fallback_model:
                 return self._fallback_completion(kwargs, e, is_async=False)
@@ -195,14 +213,12 @@ class LLMClient:
 
         try:
             stream = litellm.completion(**kwargs)
+            return self._consume_stream(stream, on_chunk=on_chunk, model=model)
         except Exception:
-            # Fall back to non-streaming on any stream setup error
-            logger.debug("Streaming setup failed, falling back to non-streaming")
-            kwargs.pop("stream", None)
-            kwargs.pop("stream_options", None)
+            # Fall back to non-streaming on any error (setup OR mid-stream).
+            # self.completion() has full cross-provider fallback logic.
+            logger.debug("Streaming failed, falling back to non-streaming completion with fallback")
             return self.completion(messages, tools=tools, stop=stop, model=model, thinking=thinking)
-
-        return self._consume_stream(stream, on_chunk=on_chunk, model=model)
 
     def _consume_stream(
         self,
@@ -319,15 +335,33 @@ class LLMClient:
 
         _BadRequestError = getattr(litellm, "BadRequestError", None)
 
+        # Errors that should trigger cross-provider fallback
+        _fallback_errors = (
+            litellm.RateLimitError,
+            litellm.APIError,
+            litellm.APIConnectionError,
+            litellm.ServiceUnavailableError,
+            litellm.NotFoundError,
+            litellm.InternalServerError,
+        )
+        # Subset where rotating API keys might help (not model-not-found)
+        _rotation_errors = (
+            litellm.RateLimitError,
+            litellm.APIError,
+            litellm.APIConnectionError,
+            litellm.ServiceUnavailableError,
+            litellm.InternalServerError,
+        )
+
         try:
             response = await self._acompletion_with_recovery(kwargs, litellm=litellm)
             self._record_response_usage(response)
             return response
         except Exception as e:
-            if not isinstance(e, (litellm.RateLimitError, litellm.APIError, litellm.APIConnectionError)):
+            if not isinstance(e, _fallback_errors):
                 raise
 
-            if self._auth_profile_manager:
+            if self._auth_profile_manager and isinstance(e, _rotation_errors):
                 if active_profile_name:
                     self._auth_profile_manager.mark_failed(active_profile_name)
                 while next_profile := self._auth_profile_manager.rotate():
@@ -339,7 +373,7 @@ class LLMClient:
                         self._auth_profile_manager.mark_success(next_profile.name)
                         self._record_response_usage(response)
                         return response
-                    except (litellm.RateLimitError, litellm.APIError, litellm.APIConnectionError):
+                    except _rotation_errors:
                         self._auth_profile_manager.mark_failed(next_profile.name)
             if _BadRequestError and isinstance(e, _BadRequestError):
                 raise
@@ -509,15 +543,29 @@ class LLMClient:
             kwargs.pop("temperature", None)
 
         if is_async:
-            return self._afallback_completion(kwargs, litellm)
+            return self._afallback_completion(kwargs, litellm, original_error)
 
-        response = self._completion_with_recovery(kwargs, litellm=litellm)
+        try:
+            response = self._completion_with_recovery(kwargs, litellm=litellm)
+        except Exception as fallback_err:
+            logger.error(
+                f"Fallback model {self.fallback_model} also failed ({type(fallback_err).__name__}): {fallback_err}"
+            )
+            raise fallback_err from original_error
         self._record_response_usage(response, provider=self.fallback_provider, model=self.fallback_model)
         return response
 
-    async def _afallback_completion(self, kwargs: dict[str, Any], litellm: Any) -> Any:
+    async def _afallback_completion(
+        self, kwargs: dict[str, Any], litellm: Any, original_error: Exception | None = None
+    ) -> Any:
         """Async fallback completion."""
-        response = await self._acompletion_with_recovery(kwargs, litellm=litellm)
+        try:
+            response = await self._acompletion_with_recovery(kwargs, litellm=litellm)
+        except Exception as fallback_err:
+            logger.error(
+                f"Fallback model {self.fallback_model} also failed ({type(fallback_err).__name__}): {fallback_err}"
+            )
+            raise fallback_err from original_error
         self._record_response_usage(response, provider=self.fallback_provider, model=self.fallback_model)
         return response
 
@@ -574,6 +622,22 @@ class LLMClient:
             kwargs.pop("temperature", None)
             logger.warning(f"Temperature not supported by {kwargs.get('model')}, retrying without")
             return True
+
+        # Gemini: context caching requires min 2048 tokens.  Strip cache_control
+        # annotations from system messages and retry as plain text.
+        if "cached content is too small" in message.lower():
+            messages = kwargs.get("messages", [])
+            stripped = False
+            for msg in messages:
+                content = msg.get("content")
+                if isinstance(content, list):
+                    # Content-block format with cache_control — flatten to plain string
+                    parts = [block.get("text", "") for block in content if isinstance(block, dict)]
+                    msg["content"] = "\n\n".join(parts)
+                    stripped = True
+            if stripped:
+                logger.warning("Prompt too small for Gemini context cache, retrying without cache_control")
+                return True
 
         return False
 

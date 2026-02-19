@@ -33,10 +33,28 @@ class _MockBadRequestError(Exception):
         super().__init__(message)
 
 
+class _MockServiceUnavailableError(Exception):
+    def __init__(self, message="", llm_provider="", model="", status_code=503):
+        super().__init__(message)
+
+
+class _MockNotFoundError(Exception):
+    def __init__(self, message="", llm_provider="", model="", status_code=404):
+        super().__init__(message)
+
+
+class _MockInternalServerError(Exception):
+    def __init__(self, message="", llm_provider="", model="", status_code=500):
+        super().__init__(message)
+
+
 _litellm_mock.RateLimitError = _MockRateLimitError
 _litellm_mock.APIError = _MockAPIError
 _litellm_mock.APIConnectionError = _MockAPIConnectionError
 _litellm_mock.BadRequestError = _MockBadRequestError
+_litellm_mock.ServiceUnavailableError = _MockServiceUnavailableError
+_litellm_mock.NotFoundError = _MockNotFoundError
+_litellm_mock.InternalServerError = _MockInternalServerError
 _litellm_mock.completion = MagicMock()
 _litellm_mock.acompletion = MagicMock()
 
