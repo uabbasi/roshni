@@ -139,6 +139,7 @@ class TaskSpec:
     artifact_outputs: list[ArtifactSpec] = field(default_factory=list)
     depends_on: list[str] = field(default_factory=list)  # v1: ignored
     max_attempts: int = 1
+    timeout: float = 300.0  # seconds; 0 = no timeout
 
 
 @dataclass

@@ -5,6 +5,24 @@ from typing import Any
 from loguru import logger
 
 
+def safe_get_content(response: Any, default: str = "") -> str:
+    """Safely extract text content from an LLM response.
+
+    Guards against empty ``choices`` lists or missing ``message``/``content``
+    attributes that can occur with malformed provider responses.
+    """
+    choices = getattr(response, "choices", None)
+    if not choices:
+        logger.warning("LLM response has no choices; returning default")
+        return default
+    message = getattr(choices[0], "message", None)
+    if message is None:
+        logger.warning("LLM response choice has no message; returning default")
+        return default
+    content = getattr(message, "content", None)
+    return content if content is not None else default
+
+
 def extract_text_from_response(content: Any, log_failures: bool = False) -> str:
     """Extract text content from an LLM response.
 

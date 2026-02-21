@@ -24,6 +24,7 @@ from loguru import logger
 from roshni.agent.advisor import Advisor, AfterChatHook
 from roshni.agent.approval import ApprovalStore
 from roshni.agent.base import BaseAgent, ChatResult
+from roshni.agent.errors import friendly_error_message
 from roshni.agent.tools import ToolDefinition
 from roshni.core.config import Config
 from roshni.core.events import (
@@ -174,6 +175,7 @@ class DefaultAgent(BaseAgent):
         self.message_history: list[dict[str, Any]] = []
         self._pending_approval: dict[str, Any] | None = None
         self._require_write_approval = bool(config.get("security.require_write_approval", True))
+        self._persist_approval_grants = bool(config.get("security.persist_approval_grants", True))
 
         # Approval grant store (persistent memory of user approvals)
         default_data_dir = config.get("paths.data_dir", "~/.roshni")
@@ -306,6 +308,7 @@ class DefaultAgent(BaseAgent):
             raise ValueError(f"Session {session_id!r} not found")
         self._active_session_id = session_id
         self.message_history = [{"role": t.role, "content": t.content} for t in session.turns]
+        self._validate_history()
 
     def chat(
         self,
@@ -344,6 +347,9 @@ class DefaultAgent(BaseAgent):
                 tool_calls=[],
                 model=self.model,
             )
+
+        # Validate history before processing (catches corruption from restarts/crashes)
+        self._validate_history()
 
         # Extract text representation for logging/token counting/advisors
         message_text = self._extract_text(message) if isinstance(message, list) else message
@@ -520,9 +526,20 @@ class DefaultAgent(BaseAgent):
             return result
 
         except Exception as e:
-            logger.error(f"DefaultAgent error: {e}")
+            logger.error(f"DefaultAgent error ({type(e).__name__}): {e}")
+
+            # One-shot recovery attempt
+            recovery_text = self._attempt_recovery(e, message_text, mode, channel)
+            if recovery_text is not None:
+                return ChatResult(
+                    text=recovery_text,
+                    duration=time() - start,
+                    tool_calls=tool_call_log,
+                    model=locals().get("actual_model", self.model),
+                )
+
             return ChatResult(
-                text=f"Sorry, something went wrong: {e}",
+                text=self._friendly_error_message(e),
                 duration=time() - start,
                 tool_calls=tool_call_log,
                 model=locals().get("actual_model", self.model),
@@ -617,6 +634,9 @@ class DefaultAgent(BaseAgent):
                 response = self._llm.completion(
                     messages, tools=tool_schemas, model=selected_model, thinking=thinking_kwargs
                 )
+            if not response.choices:
+                logger.warning("LLM returned empty choices, ending tool loop")
+                break
             choice = response.choices[0]
             assistant_message = choice.message
 
@@ -687,6 +707,13 @@ class DefaultAgent(BaseAgent):
 
                 tool = tool_map.get(fn_name)
                 if tool:
+                    # Circuit breaker check — skip tools whose backing service is down
+                    if tool.service_name and not self._circuit_breaker.is_available(tool.service_name):
+                        result = f"Service '{tool.service_name}' is temporarily unavailable (circuit open)"
+                        logger.info(f"Skipping tool {fn_name}: {tool.service_name} circuit is open")
+                        self.message_history.append({"role": "tool", "tool_call_id": tool_call.id, "content": result})
+                        tool_call_log.append({"name": fn_name, "args": fn_args, "result": result})
+                        continue
                     if self._should_require_approval(tool, channel=channel):
                         try:
                             parsed_args = json.loads(fn_args) if isinstance(fn_args, str) else fn_args
@@ -1259,6 +1286,8 @@ class DefaultAgent(BaseAgent):
     # After-chat hooks
     # ------------------------------------------------------------------
 
+    _HOOK_TIMEOUT = 30.0  # seconds — warn if a hook exceeds this
+
     def _fire_after_chat_hooks(
         self,
         message: str,
@@ -1267,7 +1296,19 @@ class DefaultAgent(BaseAgent):
         channel: str | None = None,
     ) -> None:
         """Run each AfterChatHook in a bounded worker pool (fire-and-forget)."""
-        self._hook_futures = [f for f in self._hook_futures if not f.done()]
+        # Check for long-running hooks from previous calls
+        now = time()
+        remaining: list[Future[Any]] = []
+        for f in self._hook_futures:
+            if f.done():
+                continue
+            submitted_at = getattr(f, "_submitted_at", None)
+            if submitted_at and (now - submitted_at) > self._HOOK_TIMEOUT:
+                hook_name = getattr(f, "_hook_name", "unknown")
+                age = now - submitted_at
+                logger.warning(f"AfterChatHook '{hook_name}' running for {age:.1f}s (timeout={self._HOOK_TIMEOUT}s)")
+            remaining.append(f)
+        self._hook_futures = remaining
 
         for hook in self._after_chat_hooks:
             if not self._HOOK_SLOTS.acquire(blocking=False):
@@ -1283,6 +1324,8 @@ class DefaultAgent(BaseAgent):
                     self._HOOK_SLOTS.release()
 
             future = self._get_hook_pool().submit(_run)
+            future._submitted_at = time()  # type: ignore[attr-defined]
+            future._hook_name = hook.name  # type: ignore[attr-defined]
             self._hook_futures.append(future)
 
     @classmethod
@@ -1306,6 +1349,39 @@ class DefaultAgent(BaseAgent):
     def add_after_chat_hook(self, hook: AfterChatHook) -> None:
         """Register a hook for post-chat side-effects."""
         self._after_chat_hooks.append(hook)
+
+    # ------------------------------------------------------------------
+    # History validation
+    # ------------------------------------------------------------------
+
+    def _validate_history(self) -> None:
+        """Proactively validate and repair message history.
+
+        Called on session resume and at chat() entry to catch corruption
+        from crashes, partial writes, or process restarts.
+        """
+        if not self.message_history:
+            return
+
+        # Strip leading orphaned tool messages
+        while self.message_history and self.message_history[0].get("role") == "tool":
+            self.message_history.pop(0)
+
+        # Strip leading assistant+tool_calls without results
+        while (
+            self.message_history
+            and self.message_history[0].get("role") == "assistant"
+            and self.message_history[0].get("tool_calls")
+        ):
+            self.message_history.pop(0)
+
+        # Repair broken tool sequences
+        self.message_history = self._repair_tool_sequences(self.message_history)
+
+        # Coerce None content
+        for msg in self.message_history:
+            if msg.get("content") is None:
+                msg["content"] = ""
 
     # ------------------------------------------------------------------
     # History management
@@ -1340,6 +1416,8 @@ class DefaultAgent(BaseAgent):
             return False
         if not (self._require_write_approval and tool.needs_approval()):
             return False
+        if not self._persist_approval_grants:
+            return True
         return not self._approval_store.is_approved(tool.name)
 
     @staticmethod
@@ -1415,7 +1493,8 @@ class DefaultAgent(BaseAgent):
                     {"role": "tool", "tool_call_id": tc["id"], "content": self._normalize_content(tc_result)}
                 )
 
-            self._approval_store.grant(tool_name)
+            if self._persist_approval_grants:
+                self._approval_store.grant(tool_name)
             self._pending_approval = None
             return None  # Signal chat() to resume tool loop
 
@@ -1439,6 +1518,103 @@ class DefaultAgent(BaseAgent):
         self.message_history.append({"role": "assistant", "content": prompt})
         self._trim_history()
         return ChatResult(text=prompt, tool_calls=tool_call_log, model=self.model)
+
+    # ------------------------------------------------------------------
+    # Error recovery
+    # ------------------------------------------------------------------
+
+    def _attempt_recovery(
+        self,
+        error: Exception,
+        message: str,
+        mode: str | None,
+        channel: str | None,
+    ) -> str | None:
+        """One-shot recovery attempt for known error classes.
+
+        Returns response text on success, None on failure.
+        Wrapped in its own try/except to prevent recursive errors.
+        """
+        try:
+            error_str = str(error).lower()
+            error_type = type(error).__name__
+
+            # Tool-call BadRequestError: repair history and retry once
+            if "badrequest" in error_type.lower() and ("tool_call_id" in error_str or "tool_calls" in error_str):
+                logger.info("Attempting recovery: repairing tool sequences and retrying")
+                self.message_history = self._repair_tool_sequences(self.message_history)
+                selected_model = self._select_model(message, mode)
+                tool_schemas = [t.to_litellm_schema() for t in self.tools] if self.tools else None
+                tool_call_log: list[dict[str, Any]] = []
+                self._run_tool_loop(
+                    tool_schemas=tool_schemas,
+                    tool_call_log=tool_call_log,
+                    max_iterations=1,
+                    on_tool_start=None,
+                    mode=mode,
+                    selected_model=selected_model,
+                    channel=channel,
+                    message=message,
+                )
+                text = self._extract_final_text()
+                if text:
+                    return text
+
+            # NotFoundError: switch to fallback/light model and retry once
+            if "notfound" in error_type.lower():
+                logger.info("Attempting recovery: switching model after NotFoundError")
+                fallback_model = self._llm.fallback_model
+                if not fallback_model and self._model_selector:
+                    fallback_model = self._model_selector.light_model.name
+                if fallback_model:
+                    tool_schemas = [t.to_litellm_schema() for t in self.tools] if self.tools else None
+                    tool_call_log = []
+                    self._run_tool_loop(
+                        tool_schemas=tool_schemas,
+                        tool_call_log=tool_call_log,
+                        max_iterations=1,
+                        on_tool_start=None,
+                        mode=mode,
+                        selected_model=fallback_model,
+                        channel=channel,
+                        message=message,
+                    )
+                    text = self._extract_final_text()
+                    if text:
+                        return text
+
+            # RateLimitError / APIConnectionError: wait briefly and retry once
+            if "ratelimit" in error_type.lower() or "apiconnection" in error_type.lower():
+                import time as _time
+
+                logger.info(f"Attempting recovery: waiting 2s after {error_type}")
+                _time.sleep(2)
+                selected_model = self._select_model(message, mode)
+                tool_schemas = [t.to_litellm_schema() for t in self.tools] if self.tools else None
+                tool_call_log = []
+                self._run_tool_loop(
+                    tool_schemas=tool_schemas,
+                    tool_call_log=tool_call_log,
+                    max_iterations=1,
+                    on_tool_start=None,
+                    mode=mode,
+                    selected_model=selected_model,
+                    channel=channel,
+                    message=message,
+                )
+                text = self._extract_final_text()
+                if text:
+                    return text
+
+        except Exception as recovery_err:
+            logger.warning(f"Recovery attempt also failed ({type(recovery_err).__name__}): {recovery_err}")
+
+        return None
+
+    @staticmethod
+    def _friendly_error_message(error: Exception) -> str:
+        """Return a short, user-readable message for common error types."""
+        return friendly_error_message(error)
 
     # ------------------------------------------------------------------
     # Config resolution

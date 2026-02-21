@@ -22,6 +22,8 @@ from typing import Any
 
 from loguru import logger
 
+from roshni.agent.errors import friendly_error_message
+
 
 @dataclass
 class RouteResult:
@@ -181,4 +183,4 @@ class Router:
             return RouteResult(text=response, agent_name=agent.name if hasattr(agent, "name") else "agent")
         except Exception as e:
             logger.error(f"Agent failed: {e}")
-            return RouteResult(text=f"Error: {e}", agent_name="agent")
+            return RouteResult(text=friendly_error_message(e), agent_name="agent")

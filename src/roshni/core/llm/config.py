@@ -211,6 +211,64 @@ def get_available_families() -> list[str]:
     return [k for k, v in MODEL_CATALOG.items() if len(v) >= 3]
 
 
+def resolve_model_name(name: str) -> str | None:
+    """Fuzzy-match a potentially invalid model name to a valid MODEL_CATALOG entry.
+
+    Resolution order:
+    1. Exact match against catalog model names
+    2. Exact match against MODEL_OUTPUT_TOKEN_LIMITS keys (they're valid substrings)
+    3. Partial match: input is a substring of a catalog model name
+    4. Partial match: a catalog model name contains the input (best = longest catalog name)
+
+    Returns the resolved litellm model string, or None if no reasonable match.
+    """
+    name = name.strip()
+    if not name:
+        return None
+
+    # Collect all catalog model names
+    catalog_names: list[str] = []
+    for models in MODEL_CATALOG.values():
+        for m in models:
+            if m.name not in catalog_names:
+                catalog_names.append(m.name)
+
+    # 1. Exact match in catalog
+    for cn in catalog_names:
+        if cn == name:
+            return cn
+
+    # 2. Strip provider prefix and try partial match on base name
+    name_base = name.split("/")[-1] if "/" in name else name
+    name_base_lower = name_base.lower()
+
+    # 3. Partial match: input base is a substring of a catalog model's base name
+    #    Pick the best match (longest catalog name to prefer specific models)
+    candidates: list[str] = []
+    for cn in catalog_names:
+        cn_base = cn.split("/")[-1] if "/" in cn else cn
+        cn_base_lower = cn_base.lower()
+        if name_base_lower in cn_base_lower or cn_base_lower in name_base_lower:
+            candidates.append(cn)
+
+    if candidates:
+        # Prefer exact base-name prefix matches, then longest name
+        candidates.sort(key=lambda c: len(c), reverse=True)
+        return candidates[0]
+
+    # 4. Check MODEL_OUTPUT_TOKEN_LIMITS keys as partial match
+    for limit_key in MODEL_OUTPUT_TOKEN_LIMITS:
+        if name_base_lower in limit_key.lower() or limit_key.lower() in name_base_lower:
+            # Found a token limit key match — find corresponding catalog entry
+            for cn in catalog_names:
+                if limit_key in cn:
+                    return cn
+            # No catalog entry found for this limit key
+            break
+
+    return None
+
+
 def get_default_model(provider: str) -> str:
     """Get the default litellm model string for a provider."""
     model_map = {

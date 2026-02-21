@@ -56,6 +56,8 @@ class ToolDefinition:
     function: Callable[..., str]
     permission: str = "read"  # read, write, send, admin
     requires_approval: bool | None = None
+    timeout: float = 60.0  # seconds; 0 = no timeout
+    service_name: str | None = None  # for circuit breaker tracking (e.g. "gmail", "trello")
 
     @classmethod
     def from_function(
@@ -66,6 +68,8 @@ class ToolDefinition:
         args_schema: Any,
         permission: str = "read",
         requires_approval: bool | None = None,
+        timeout: float = 60.0,
+        service_name: str | None = None,
     ) -> ToolDefinition:
         """Create a ToolDefinition from a function and a schema class.
 
@@ -85,6 +89,8 @@ class ToolDefinition:
             function=func,
             permission=permission,
             requires_approval=requires_approval,
+            timeout=timeout,
+            service_name=service_name,
         )
 
     def to_litellm_schema(self) -> dict[str, Any]:
@@ -110,6 +116,34 @@ class ToolDefinition:
             return self.requires_approval
         return self.permission in {"write", "send", "admin"}
 
+    def _execute_with_timeout(self, arguments: dict[str, Any]) -> str:
+        """Execute the tool function with a wall-clock timeout.
+
+        Uses ``ThreadPoolExecutor`` + ``future.result(timeout=)`` — same
+        pattern as ``GoogleSheetsBase._with_timeout``.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+        from concurrent.futures import TimeoutError as FuturesTimeout
+
+        executor = ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(self.function, **arguments)
+        timed_out = False
+        try:
+            return future.result(timeout=self.timeout)
+        except FuturesTimeout:
+            if future.done():
+                # Function itself raised TimeoutError — propagate for retry logic
+                raise future.exception()  # type: ignore[misc]
+            # Genuine wall-clock timeout — function is still running
+            timed_out = True
+            future.cancel()
+            logger.warning(f"Tool {self.name} timed out after {self.timeout}s")
+            executor.shutdown(wait=False, cancel_futures=True)
+            return f"Error: {self.name} timed out after {self.timeout}s"
+        finally:
+            if not timed_out:
+                executor.shutdown(wait=True, cancel_futures=False)
+
     def execute(self, arguments: dict[str, Any] | str, *, max_attempts: int = 3) -> str:
         """Execute the tool, retrying transient errors with exponential backoff."""
         if isinstance(arguments, str):
@@ -120,6 +154,8 @@ class ToolDefinition:
         assert isinstance(arguments, dict)
         for attempt in range(1, max_attempts + 1):
             try:
+                if self.timeout > 0:
+                    return self._execute_with_timeout(arguments)
                 return self.function(**arguments)
             except _TRANSIENT_ERRORS as e:
                 if attempt < max_attempts:

@@ -96,5 +96,6 @@ class TestRouting:
     def test_no_factory_returns_error(self):
         router = Router()
         result = asyncio.run(router.route("test"))
-        assert "Error" in result.text
-        assert "agent_factory" in result.text
+        # Error is sanitized via friendly_error_message — no internal details leaked
+        assert "unexpected" in result.text.lower() or "something" in result.text.lower()
+        assert "agent_factory" not in result.text  # internal detail must NOT be leaked

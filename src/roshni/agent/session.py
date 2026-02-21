@@ -16,6 +16,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from loguru import logger
+
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
@@ -107,8 +109,17 @@ class JSONLSessionStore:
         if not lines:
             return None
         header = lines[0]
-        turns = [Turn(**line) for line in lines[1:]]
-        return Session(**header, turns=turns)
+        turns: list[Turn] = []
+        for i, line in enumerate(lines[1:], 2):
+            try:
+                turns.append(Turn(**line))
+            except (TypeError, KeyError) as e:
+                logger.warning(f"Skipping malformed turn at line {i} in session {session_id}: {e}")
+        try:
+            return Session(**header, turns=turns)
+        except (TypeError, KeyError) as e:
+            logger.error(f"Corrupted session header for {session_id}: {e}")
+            return None
 
     def list_sessions(
         self,
@@ -180,10 +191,14 @@ class JSONLSessionStore:
     def _read_lines_unlocked(path: Path) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         with open(path) as f:
-            for line in f:
+            for line_num, line in enumerate(f, 1):
                 line = line.strip()
-                if line:
+                if not line:
+                    continue
+                try:
                     results.append(json.loads(line))
+                except json.JSONDecodeError:
+                    logger.warning(f"Skipping corrupted JSONL line {line_num} in {path}")
         return results
 
     @staticmethod

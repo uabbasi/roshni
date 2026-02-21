@@ -13,6 +13,7 @@ registered :data:`ResponseHandler` callbacks.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -47,6 +48,7 @@ class EventGateway:
         self._queue: asyncio.PriorityQueue[Any] = asyncio.PriorityQueue(maxsize=max_queue_size)
         self._consumer_task: asyncio.Task | None = None
         self._response_handlers: dict[EventSource | None, ResponseHandler] = {}
+        self._dead_letters: list[tuple[GatewayEvent, str, float]] = []
 
     # ── Public API ─────────────────────────────────────────────────
 
@@ -122,7 +124,7 @@ class EventGateway:
             finally:
                 self._queue.task_done()
 
-    async def _process_event(self, event: GatewayEvent) -> None:
+    async def _process_event(self, event: GatewayEvent, *, is_retry: bool = False) -> None:
         """Invoke the agent and route the response."""
         logger.info(f"Processing event {event.id} ({event.source.value}): {event.message[:80]}")
         try:
@@ -136,6 +138,14 @@ class EventGateway:
             logger.error(f"Agent error on event {event.id}: {exc}")
             if event._response_future and not event._response_future.done():
                 event._response_future.set_exception(exc)
+            elif not is_retry and event.call_type in ("scheduled", "heartbeat"):
+                # One retry for scheduled/heartbeat events
+                logger.info(f"Retrying scheduled event {event.id}")
+                await self._process_event(event, is_retry=True)
+            else:
+                # Record in dead letter queue for introspection
+                self._dead_letters.append((event, str(exc), time.time()))
+                logger.warning(f"Event {event.id} moved to dead letter queue ({len(self._dead_letters)} total)")
             return
 
         # Route the response
@@ -143,6 +153,21 @@ class EventGateway:
             event._response_future.set_result(response)
         else:
             await self._dispatch_response(event, response)
+
+    # ── Dead letter queue introspection ────────────────────────────
+
+    @property
+    def dead_letter_count(self) -> int:
+        """Number of events in the dead letter queue."""
+        return len(self._dead_letters)
+
+    def get_dead_letters(self) -> list[tuple[GatewayEvent, str, float]]:
+        """Return all dead letter entries as (event, error_message, timestamp)."""
+        return list(self._dead_letters)
+
+    def clear_dead_letters(self) -> None:
+        """Clear the dead letter queue."""
+        self._dead_letters.clear()
 
     async def _dispatch_response(self, event: GatewayEvent, response: str) -> None:
         """Call the appropriate response handler for a fire-and-forget event."""

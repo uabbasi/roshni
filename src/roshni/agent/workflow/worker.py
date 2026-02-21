@@ -145,6 +145,36 @@ class WorkerPool:
         project.last_event_seq = evt.seq
 
         async with self._semaphore:
+            if task.timeout > 0:
+                try:
+                    return await asyncio.wait_for(
+                        self._execute_worker(project, phase, task, worker_id, attempt),
+                        timeout=task.timeout,
+                    )
+                except TimeoutError:
+                    logger.error(f"Worker {worker_id} timed out after {task.timeout}s on task {task.id}")
+                    evt = self._backend.create_event(
+                        project.id,
+                        TASK_FAILED,
+                        worker_id,
+                        {
+                            "phase_id": phase.id,
+                            "task_id": task.id,
+                            "worker_id": worker_id,
+                            "attempt": attempt,
+                            "error": f"Timed out after {task.timeout}s",
+                            "retryable": attempt < task.max_attempts,
+                        },
+                    )
+                    await self._backend.record_event(project.id, evt)
+                    project.last_event_seq = evt.seq
+                    return WorkerResult(
+                        worker_id=worker_id,
+                        task=task,
+                        response="",
+                        success=False,
+                        error=f"Timed out after {task.timeout}s",
+                    )
             return await self._execute_worker(project, phase, task, worker_id, attempt)
 
     async def _execute_worker(

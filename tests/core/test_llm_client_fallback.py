@@ -28,7 +28,7 @@ class _MockAPIConnectionError(Exception):
         super().__init__(message)
 
 
-class _MockBadRequestError(Exception):
+class _MockBadRequestError(_MockAPIError):
     def __init__(self, message="", llm_provider="", model="", status_code=400):
         super().__init__(message)
 
@@ -69,6 +69,16 @@ def _mock_litellm():
         sys.modules["litellm"] = old
     else:
         sys.modules.pop("litellm", None)
+
+
+@pytest.fixture(autouse=True)
+def _reset_model_health():
+    """Reset model health tracker between tests to prevent state leakage."""
+    from roshni.core.llm.model_health import reset_model_health
+
+    reset_model_health()
+    yield
+    reset_model_health()
 
 
 def _make_response(content="Hello", prompt_tokens=10, completion_tokens=5):
@@ -312,6 +322,182 @@ class TestCompatibilityRecovery:
         assert LLMClient._supports_custom_temperature("openai/o3") is False
         assert LLMClient._supports_custom_temperature("deepseek/deepseek-reasoner") is False
         assert LLMClient._supports_custom_temperature("gpt-5.2-chat-latest") is True
+
+
+class TestToolCallRepairRecovery:
+    """Tests for self-healing tool_call message repair in the recovery loop."""
+
+    @patch("roshni.core.llm.client.check_budget", return_value=(True, 100_000))
+    @patch("roshni.core.llm.client.record_usage")
+    def test_bad_request_tool_call_ids_self_heals(self, mock_record, mock_budget):
+        """BadRequest with 'tool_call_ids did not have response' triggers repair and retries."""
+        from roshni.core.llm.client import LLMClient
+
+        calls = []
+
+        def side_effect(**kwargs):
+            calls.append(dict(kwargs))
+            messages = kwargs.get("messages", [])
+            # Check if there are orphaned tool_calls without results
+            for i, msg in enumerate(messages):
+                if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                    for tc in msg["tool_calls"]:
+                        tc_id = tc["id"]
+                        # Check if next message is a tool result for this ID
+                        has_result = any(
+                            m.get("role") == "tool" and m.get("tool_call_id") == tc_id for m in messages[i + 1 :]
+                        )
+                        if not has_result:
+                            raise _MockBadRequestError("tool_call_ids did not have response messages: ['call_orphan']")
+            return _make_response("Recovered after repair")
+
+        _litellm_mock.completion = MagicMock(side_effect=side_effect)
+
+        client = LLMClient(model="gpt-4o-mini")
+        # Messages with an orphaned tool_call (missing tool result)
+        messages = [
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "call_orphan", "type": "function", "function": {"name": "search", "arguments": "{}"}}
+                ],
+            },
+            {"role": "user", "content": "what happened?"},
+        ]
+
+        resp = client.completion(messages)
+        assert resp.choices[0].message.content == "Recovered after repair"
+        # Should have retried after repairing
+        assert len(calls) >= 2
+
+    @patch("roshni.core.llm.client.check_budget", return_value=(True, 100_000))
+    @patch("roshni.core.llm.client.record_usage")
+    def test_bad_request_must_be_followed_by_self_heals(self, mock_record, mock_budget):
+        """BadRequest with 'must be followed by' also triggers repair."""
+        from roshni.core.llm.client import LLMClient
+
+        attempt = [0]
+
+        def side_effect(**kwargs):
+            attempt[0] += 1
+            if attempt[0] == 1:
+                raise _MockBadRequestError("Messages with tool_calls must be followed by tool results")
+            return _make_response("Fixed")
+
+        _litellm_mock.completion = MagicMock(side_effect=side_effect)
+
+        client = LLMClient(model="gpt-4o-mini")
+        messages = [
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "echo", "arguments": "{}"}}],
+            },
+        ]
+
+        resp = client.completion(messages)
+        assert resp.choices[0].message.content == "Fixed"
+        assert attempt[0] == 2
+
+
+class TestNotFoundRecovery:
+    """Tests for model name auto-correction on NotFoundError."""
+
+    @patch("roshni.core.llm.client.check_budget", return_value=(True, 100_000))
+    @patch("roshni.core.llm.client.record_usage")
+    def test_not_found_error_resolves_model_name(self, mock_record, mock_budget):
+        """NotFound with 'claude-haiku-4' auto-corrects to catalog model and retries."""
+        from roshni.core.llm.client import LLMClient
+
+        calls = []
+
+        def side_effect(**kwargs):
+            calls.append(kwargs["model"])
+            if kwargs["model"] == "claude-haiku-4":
+                raise _MockNotFoundError("model: claude-haiku-4 not found")
+            return _make_response("Resolved OK")
+
+        _litellm_mock.completion = MagicMock(side_effect=side_effect)
+
+        client = LLMClient(model="claude-haiku-4")
+        messages = [{"role": "user", "content": "hi"}]
+        resp = client.completion(messages)
+
+        assert resp.choices[0].message.content == "Resolved OK"
+        assert calls[0] == "claude-haiku-4"
+        # Second call should use the resolved model name
+        assert calls[1] != "claude-haiku-4"
+        assert "claude-haiku" in calls[1]
+
+    @patch("roshni.core.llm.client.check_budget", return_value=(True, 100_000))
+    @patch("roshni.core.llm.client.record_usage")
+    def test_not_found_falls_back_when_no_catalog_match(self, mock_record, mock_budget):
+        """NotFound with unknown model falls back to fallback_model."""
+        from roshni.core.llm.client import LLMClient
+
+        calls = []
+
+        def side_effect(**kwargs):
+            calls.append(kwargs["model"])
+            if kwargs["model"] == "totally-fake-model":
+                raise _MockNotFoundError("model: totally-fake-model not found")
+            return _make_response("Fallback OK")
+
+        _litellm_mock.completion = MagicMock(side_effect=side_effect)
+
+        client = LLMClient(model="totally-fake-model", fallback_model="deepseek/deepseek-chat")
+        messages = [{"role": "user", "content": "hi"}]
+        resp = client.completion(messages)
+
+        assert resp.choices[0].message.content == "Fallback OK"
+        # Should try fake model, then switch to fallback within recovery loop
+        assert "totally-fake-model" in calls
+        assert "deepseek/deepseek-chat" in calls
+
+    @patch("roshni.core.llm.client.check_budget", return_value=(True, 100_000))
+    @patch("roshni.core.llm.client.record_usage")
+    def test_not_found_no_match_no_fallback_raises(self, mock_record, mock_budget):
+        """NotFound with no catalog match and no fallback raises."""
+        from roshni.core.llm.client import LLMClient
+
+        _litellm_mock.completion = MagicMock(side_effect=_MockNotFoundError("model: totally-fake-model not found"))
+
+        client = LLMClient(model="totally-fake-model")  # no fallback
+        with pytest.raises(_MockNotFoundError):
+            client.completion([{"role": "user", "content": "hi"}])
+
+
+class TestAsyncFallbackAfterBadRequest:
+    """Tests that async path allows fallback after unrecoverable BadRequest."""
+
+    @patch("roshni.core.llm.client.check_budget", return_value=(True, 100_000))
+    @patch("roshni.core.llm.client.record_usage")
+    @pytest.mark.asyncio
+    async def test_async_bad_request_can_fallback(self, mock_record, mock_budget):
+        """Verify acompletion allows fallback after unrecoverable BadRequest."""
+        from roshni.core.llm.client import LLMClient
+
+        calls = []
+
+        async def async_side_effect(**kwargs):
+            calls.append(kwargs["model"])
+            if kwargs["model"] == "gpt-4o-mini":
+                raise _MockBadRequestError("Some unrecoverable bad request error")
+            return _make_response("Fallback OK")
+
+        _litellm_mock.acompletion = MagicMock(side_effect=async_side_effect)
+
+        client = LLMClient(model="gpt-4o-mini", fallback_model="anthropic/claude-sonnet-4-6")
+        messages = [{"role": "user", "content": "hi"}]
+        resp = await client.acompletion(messages)
+
+        # Should have fallen back to the fallback model
+        assert resp.choices[0].message.content == "Fallback OK"
+        assert "gpt-4o-mini" in calls
+        assert "anthropic/claude-sonnet-4-6" in calls
 
 
 class TestAuthProfileFailover:

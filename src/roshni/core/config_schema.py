@@ -78,6 +78,7 @@ class SecurityConfig(BaseModel):
     """Security-related toggles."""
 
     require_write_approval: bool = True
+    persist_approval_grants: bool = True
     auto_approve_channels: list[str] = []
     approval_grants_path: str | None = None
 

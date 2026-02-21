@@ -15,11 +15,15 @@ from loguru import logger
 
 _lock = threading.Lock()
 _LOCK_TIMEOUT = 5  # seconds — don't block LLM calls forever on hung fs
+_RECORD_LOCK_TIMEOUT = 0.5  # shorter for fire-and-forget record_usage
 _DEFAULT_DAILY_LIMIT = 500_000
 _DEFAULT_DAILY_COST_LIMIT = 7.0  # USD — primary budget control
 _BUDGET_RESET_HOUR = 6  # Reset budget at 6am, not midnight
 _FAIL_OPEN_ON_ERROR = False  # safer default: fail closed when budget state is unavailable
 _degraded_warned: set[str] = set()
+
+# Cached last-known budget state for check_budget fallback when lock is contended
+_last_known_budget: tuple[bool, int] | None = None
 
 # Module-level path — set via configure() or defaults to ~/.roshni-data/token_usage.json
 _usage_path: str | None = None
@@ -116,7 +120,7 @@ def record_usage(
 ) -> None:
     """Add tokens to today's tally. Never raises."""
     try:
-        if not _lock.acquire(timeout=_LOCK_TIMEOUT):
+        if not _lock.acquire(timeout=_RECORD_LOCK_TIMEOUT):
             _log_degraded_once("lock timeout in record_usage; usage increment skipped")
             return
         try:
@@ -138,12 +142,17 @@ def check_budget(daily_limit: int | None = None, daily_cost_limit: float | None 
     """Return (within_budget, remaining_tokens).
 
     If cost tracking is available, uses dollar limit. Falls back to token limit.
+    When the lock is contended, returns the last known budget state instead of
+    failing closed (avoids blocking parallel tool calls).
     """
+    global _last_known_budget
     token_limit = daily_limit or _DEFAULT_DAILY_LIMIT
     cost_limit = daily_cost_limit or _DEFAULT_DAILY_COST_LIMIT
     try:
         if not _lock.acquire(timeout=_LOCK_TIMEOUT):
             _log_degraded_once("lock timeout in check_budget")
+            if _last_known_budget is not None:
+                return _last_known_budget
             if _FAIL_OPEN_ON_ERROR:
                 return True, token_limit
             return False, 0
@@ -158,13 +167,18 @@ def check_budget(daily_limit: int | None = None, daily_cost_limit: float | None 
             within = cost_used < cost_limit
             remaining_frac = max(0, (cost_limit - cost_used) / cost_limit)
             remaining = int(token_limit * remaining_frac)
+            _last_known_budget = (within, remaining)
             return within, remaining
 
         # Fallback: token-based (legacy / cost not yet recorded)
         total = data.get("input_tokens", 0) + data.get("output_tokens", 0)
-        return total < token_limit, token_limit - total
+        result = (total < token_limit, token_limit - total)
+        _last_known_budget = result
+        return result
     except Exception as e:
         _log_degraded_once(f"check_budget failure: {e}")
+        if _last_known_budget is not None:
+            return _last_known_budget
         if _FAIL_OPEN_ON_ERROR:
             return True, token_limit
         return False, 0

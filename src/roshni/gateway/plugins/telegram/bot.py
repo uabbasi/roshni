@@ -14,6 +14,7 @@ from typing import Any
 from loguru import logger
 
 from roshni.agent.base import BaseAgent
+from roshni.agent.errors import friendly_error_message
 from roshni.gateway.base import BotGateway
 
 # Telegram message length limit
@@ -235,7 +236,7 @@ class TelegramGateway(BotGateway):
                 stop_typing.set()
                 await typing_task
                 logger.error(f"Telegram message handling failed: {e}")
-                await update.message.reply_text(f"Something went wrong: {e}")
+                await update.message.reply_text(friendly_error_message(e))
 
         # Build application
         app = Application.builder().token(self.bot_token).build()

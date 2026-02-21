@@ -33,7 +33,7 @@ class TestConfigSchema:
                 },
             },
             "bot": {"name": "mybot", "token": "tok-123"},
-            "security": {"require_write_approval": False},
+            "security": {"require_write_approval": False, "persist_approval_grants": False},
             "integrations": {"gmail": {"enabled": False}},
             "vault": {"path": "/some/vault"},
         }
@@ -44,6 +44,7 @@ class TestConfigSchema:
         assert cfg.llm.selector.tool_result_chars_threshold == 800
         assert cfg.bot.name == "mybot"
         assert cfg.security.require_write_approval is False
+        assert cfg.security.persist_approval_grants is False
         assert cfg.integrations.gmail.enabled is False
         assert cfg.vault.path == "/some/vault"
 
@@ -53,6 +54,7 @@ class TestConfigSchema:
         assert cfg.llm.default == "anthropic"
         assert cfg.bot.name == "roshni"
         assert cfg.security.require_write_approval is True
+        assert cfg.security.persist_approval_grants is True
         assert cfg.integrations.trello.enabled is True
         assert cfg.vault.path is None
 

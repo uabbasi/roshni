@@ -12,9 +12,10 @@ from typing import Any
 
 from loguru import logger
 
-from .config import get_default_model, get_model_max_tokens, infer_provider
+from .config import get_default_model, get_model_max_tokens, infer_provider, resolve_model_name
+from .model_health import is_model_healthy, record_model_outcome
 from .token_budget import check_budget, record_usage
-from .utils import extract_text_from_response
+from .utils import extract_text_from_response, safe_get_content
 
 
 class LLMClient:
@@ -134,8 +135,14 @@ class LLMClient:
             raise ImportError("Install LLM support with: pip install roshni[llm]")
 
         self._check_budget()
+        effective_model = model or self.model
         kwargs = self._build_completion_kwargs(messages, tools=tools, stop=stop, model=model, thinking=thinking)
         active_profile_name = self._inject_active_auth_profile(kwargs)
+
+        # Skip unhealthy primary model — go straight to fallback if available
+        if not is_model_healthy(effective_model) and self.fallback_model:
+            logger.info(f"Model {effective_model} circuit is open, skipping to fallback {self.fallback_model}")
+            return self._fallback_completion(kwargs, RuntimeError("model circuit open"), is_async=False)
 
         # Errors that should trigger cross-provider fallback
         _fallback_errors = (
@@ -158,8 +165,10 @@ class LLMClient:
         try:
             response = self._completion_with_recovery(kwargs, litellm=litellm)
             self._record_response_usage(response)
+            record_model_outcome(effective_model, success=True)
             return response
         except Exception as e:
+            record_model_outcome(effective_model, success=False)
             if not isinstance(e, _fallback_errors):
                 raise
 
@@ -167,7 +176,13 @@ class LLMClient:
             if self._auth_profile_manager and isinstance(e, _rotation_errors):
                 if active_profile_name:
                     self._auth_profile_manager.mark_failed(active_profile_name)
+                max_rotations = len(self._auth_profile_manager.profiles)
+                rotation_attempts = 0
                 while next_profile := self._auth_profile_manager.rotate():
+                    rotation_attempts += 1
+                    if rotation_attempts > max_rotations:
+                        logger.warning("Auth profile rotation exhausted all profiles")
+                        break
                     kwargs["api_key"] = next_profile.api_key
                     if next_profile.model:
                         kwargs["model"] = next_profile.model
@@ -175,6 +190,7 @@ class LLMClient:
                         response = self._completion_with_recovery(kwargs, litellm=litellm)
                         self._auth_profile_manager.mark_success(next_profile.name)
                         self._record_response_usage(response)
+                        record_model_outcome(effective_model, success=True)
                         return response
                     except _rotation_errors:
                         self._auth_profile_manager.mark_failed(next_profile.name)
@@ -211,13 +227,18 @@ class LLMClient:
         kwargs["stream"] = True
         kwargs["stream_options"] = {"include_usage": True}
 
+        # Phase 1: Stream setup — errors here mean we never got any data
         try:
             stream = litellm.completion(**kwargs)
-            return self._consume_stream(stream, on_chunk=on_chunk, model=model)
         except Exception:
-            # Fall back to non-streaming on any error (setup OR mid-stream).
-            # self.completion() has full cross-provider fallback logic.
-            logger.debug("Streaming failed, falling back to non-streaming completion with fallback")
+            logger.debug("Stream setup failed, falling back to non-streaming completion")
+            return self.completion(messages, tools=tools, stop=stop, model=model, thinking=thinking)
+
+        # Phase 2: Stream consumption — errors here mean partial data may exist
+        try:
+            return self._consume_stream(stream, on_chunk=on_chunk, model=model)
+        except Exception as e:
+            logger.warning(f"Mid-stream error ({type(e).__name__}), attempting partial content recovery")
             return self.completion(messages, tools=tools, stop=stop, model=model, thinking=thinking)
 
     def _consume_stream(
@@ -231,8 +252,34 @@ class LLMClient:
         content_parts: list[str] = []
         tool_calls_by_index: dict[int, dict[str, Any]] = {}
         usage = None
-        has_tool_calls = False
 
+        try:
+            usage = self._iter_stream_chunks(stream, content_parts, tool_calls_by_index, on_chunk)
+        except Exception as e:
+            partial = "".join(content_parts)
+            if partial:
+                logger.warning(f"Mid-stream error with {len(partial)} chars recovered: {type(e).__name__}")
+            else:
+                raise  # No partial content — re-raise for fallback
+
+        response = self._assemble_stream_response(
+            content="".join(content_parts),
+            tool_calls_by_index=tool_calls_by_index,
+            usage=usage,
+        )
+        self._record_response_usage(response, model=model)
+        return response
+
+    @staticmethod
+    def _iter_stream_chunks(
+        stream: Any,
+        content_parts: list[str],
+        tool_calls_by_index: dict[int, dict[str, Any]],
+        on_chunk: Callable[[str], None] | None = None,
+    ) -> Any:
+        """Iterate stream chunks, accumulating content and tool calls. Returns usage."""
+        has_tool_calls = False
+        usage = None
         for chunk in stream:
             # Extract usage from final chunk
             chunk_usage = getattr(chunk, "usage", None)
@@ -270,14 +317,7 @@ class LLMClient:
                             entry["name"] = tc_delta.function.name
                         if tc_delta.function.arguments:
                             entry["arguments"] += tc_delta.function.arguments
-
-        response = self._assemble_stream_response(
-            content="".join(content_parts),
-            tool_calls_by_index=tool_calls_by_index,
-            usage=usage,
-        )
-        self._record_response_usage(response, model=model)
-        return response
+        return usage
 
     @staticmethod
     def _assemble_stream_response(
@@ -330,8 +370,14 @@ class LLMClient:
             raise ImportError("Install LLM support with: pip install roshni[llm]")
 
         self._check_budget()
+        effective_model = model or self.model
         kwargs = self._build_completion_kwargs(messages, tools=tools, stop=stop, model=model, thinking=thinking)
         active_profile_name = self._inject_active_auth_profile(kwargs)
+
+        # Skip unhealthy primary model — go straight to fallback if available
+        if not is_model_healthy(effective_model) and self.fallback_model:
+            logger.info(f"Model {effective_model} circuit is open, skipping to fallback {self.fallback_model}")
+            return await self._fallback_completion(kwargs, RuntimeError("model circuit open"), is_async=True)
 
         _BadRequestError = getattr(litellm, "BadRequestError", None)
 
@@ -356,15 +402,23 @@ class LLMClient:
         try:
             response = await self._acompletion_with_recovery(kwargs, litellm=litellm)
             self._record_response_usage(response)
+            record_model_outcome(effective_model, success=True)
             return response
         except Exception as e:
+            record_model_outcome(effective_model, success=False)
             if not isinstance(e, _fallback_errors):
                 raise
 
             if self._auth_profile_manager and isinstance(e, _rotation_errors):
                 if active_profile_name:
                     self._auth_profile_manager.mark_failed(active_profile_name)
+                max_rotations = len(self._auth_profile_manager.profiles)
+                rotation_attempts = 0
                 while next_profile := self._auth_profile_manager.rotate():
+                    rotation_attempts += 1
+                    if rotation_attempts > max_rotations:
+                        logger.warning("Auth profile rotation exhausted all profiles")
+                        break
                     kwargs["api_key"] = next_profile.api_key
                     if next_profile.model:
                         kwargs["model"] = next_profile.model
@@ -372,11 +426,10 @@ class LLMClient:
                         response = await self._acompletion_with_recovery(kwargs, litellm=litellm)
                         self._auth_profile_manager.mark_success(next_profile.name)
                         self._record_response_usage(response)
+                        record_model_outcome(effective_model, success=True)
                         return response
                     except _rotation_errors:
                         self._auth_profile_manager.mark_failed(next_profile.name)
-            if _BadRequestError and isinstance(e, _BadRequestError):
-                raise
             if self.fallback_model:
                 return await self._fallback_completion(kwargs, e, is_async=True)
             raise
@@ -397,7 +450,7 @@ class LLMClient:
         try:
             response = self.completion(messages, stop=stop)
 
-            content = response.choices[0].message.content or ""
+            content = safe_get_content(response, default="")
             text = extract_text_from_response(content)
 
             self.message_history.append({"role": "user", "content": message})
@@ -425,7 +478,7 @@ class LLMClient:
         try:
             response = await self.acompletion(messages, stop=stop)
 
-            content = response.choices[0].message.content or ""
+            content = safe_get_content(response, default="")
             text = extract_text_from_response(content)
 
             self.message_history.append({"role": "user", "content": message})
@@ -520,7 +573,42 @@ class LLMClient:
             kwargs["extra_body"] = extra_body
         if thinking:
             kwargs["thinking"] = thinking
+
+        # Proactive message validation — catch issues before the API call
+        self._validate_messages(kwargs["messages"], effective_model)
         return kwargs
+
+    @staticmethod
+    def _validate_messages(messages: list[dict[str, Any]], model: str) -> None:
+        """Proactively validate and repair message payload before sending.
+
+        Catches issues that would otherwise cause a BadRequest or silent failure:
+        - Empty messages list
+        - Leading assistant messages (some providers reject)
+        - content: None fields (OpenAI rejects)
+        - Oversized single messages (warn only)
+        """
+        if not messages:
+            logger.warning("Empty messages list passed to completion")
+            return
+
+        # Strip leading assistant messages (invalid for most providers)
+        while len(messages) > 1 and messages[0].get("role") == "assistant":
+            messages.pop(0)
+
+        # Coerce content: None -> "" to prevent provider rejection
+        for msg in messages:
+            if msg.get("content") is None and msg.get("role") != "assistant":
+                msg["content"] = ""
+
+        # Warn on oversized single message content (>100K chars)
+        for msg in messages:
+            content = msg.get("content", "")
+            if isinstance(content, str) and len(content) > 100_000:
+                logger.warning(
+                    f"Single message content exceeds 100K chars ({len(content)}) — "
+                    f"may cause token limit issues with {model}"
+                )
 
     def _fallback_completion(self, kwargs: dict[str, Any], original_error: Exception, *, is_async: bool) -> Any:
         """Retry with the fallback model. Returns response or coroutine."""
@@ -623,6 +711,13 @@ class LLMClient:
             logger.warning(f"Temperature not supported by {kwargs.get('model')}, retrying without")
             return True
 
+        # Tool-call message repair: orphaned tool_calls without matching tool results
+        msg_lower = message.lower()
+        if "tool_call_id" in msg_lower or "tool_calls" in msg_lower:
+            if "did not have response" in msg_lower or "must be followed by" in msg_lower:
+                if self._repair_tool_messages_in_kwargs(kwargs):
+                    return True
+
         # Gemini: context caching requires min 2048 tokens.  Strip cache_control
         # annotations from system messages and retry as plain text.
         if "cached content is too small" in message.lower():
@@ -639,11 +734,137 @@ class LLMClient:
                 logger.warning("Prompt too small for Gemini context cache, retrying without cache_control")
                 return True
 
+        # Gemini: safety filter triggered — strip cache_control annotations and retry
+        if "safety" in message.lower() and ("block" in message.lower() or "filter" in message.lower()):
+            messages = kwargs.get("messages", [])
+            stripped = False
+            for msg in messages:
+                content = msg.get("content")
+                if isinstance(content, list):
+                    parts = [block.get("text", "") for block in content if isinstance(block, dict)]
+                    msg["content"] = "\n\n".join(parts)
+                    stripped = True
+            if stripped:
+                logger.warning("Safety filter hit with cache_control annotations, retrying without")
+                return True
+
+        # Gemini: cached content quota exceeded, expired, or not found
+        msg_lower = message.lower()
+        if any(
+            phrase in msg_lower
+            for phrase in ("cached content quota", "cached content expired", "cached content not found")
+        ):
+            messages = kwargs.get("messages", [])
+            stripped = False
+            for msg in messages:
+                content = msg.get("content")
+                if isinstance(content, list):
+                    parts = [block.get("text", "") for block in content if isinstance(block, dict)]
+                    msg["content"] = "\n\n".join(parts)
+                    stripped = True
+            if stripped:
+                logger.warning("Cached content issue, retrying without cache_control annotations")
+                return True
+
+        return False
+
+    @staticmethod
+    def _repair_tool_messages_in_kwargs(kwargs: dict[str, Any]) -> bool:
+        """Repair orphaned tool_calls in completion kwargs messages.
+
+        Uses the same algorithm as DefaultAgent._repair_tool_sequences():
+        indexes tool results by tool_call_id, ensures contiguous results
+        after each assistant+tool_calls message, and injects synthetic
+        results for missing ones.
+
+        Returns True if any repairs were made.
+        """
+        messages = kwargs.get("messages")
+        if not messages:
+            return False
+
+        # Index existing tool results by their tool_call_id
+        tool_result_by_id: dict[str, dict[str, Any]] = {}
+        for msg in messages:
+            if msg.get("role") == "tool" and msg.get("tool_call_id"):
+                tool_result_by_id[msg["tool_call_id"]] = msg
+
+        # Collect tool_call_ids owned by assistant messages
+        owned_ids: set[str] = set()
+        for msg in messages:
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                for tc in msg["tool_calls"]:
+                    tc_id = tc.get("id") or tc.get("tool_call_id", "")
+                    if tc_id:
+                        owned_ids.add(tc_id)
+
+        if not owned_ids:
+            return False
+
+        # Rebuild: place each assistant's tool results right after it
+        repaired: list[dict[str, Any]] = []
+        injected = 0
+
+        for msg in messages:
+            if msg.get("role") == "tool" and msg.get("tool_call_id") in owned_ids:
+                continue  # Re-placed after its assistant message
+
+            repaired.append(msg)
+
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                for tc in msg["tool_calls"]:
+                    tc_id = tc.get("id") or tc.get("tool_call_id", "")
+                    if tc_id in tool_result_by_id:
+                        repaired.append(tool_result_by_id[tc_id])
+                    elif tc_id:
+                        name = tc.get("function", {}).get("name", "unknown")
+                        repaired.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tc_id,
+                                "content": f"[Result unavailable — {name} was interrupted]",
+                            }
+                        )
+                        injected += 1
+
+        if injected:
+            logger.warning(f"LLMClient: repaired {injected} missing tool result(s) in completion kwargs")
+            kwargs["messages"] = repaired
+            return True
+
+        # Even if no injections, check if reordering was needed
+        if repaired != messages:
+            logger.warning("LLMClient: reordered tool results to fix contiguity")
+            kwargs["messages"] = repaired
+            return True
+
+        return False
+
+    def _apply_model_not_found_recovery(self, kwargs: dict[str, Any], error: Exception) -> bool:
+        """Try to resolve an invalid model name or switch to fallback on NotFoundError."""
+        failed_model = kwargs.get("model", "")
+        resolved = resolve_model_name(failed_model)
+        if resolved and resolved != failed_model:
+            logger.warning(f"Model '{failed_model}' not found, resolved to '{resolved}'")
+            kwargs["model"] = resolved
+            # Update max_tokens for the resolved model
+            new_limit = get_model_max_tokens(resolved, infer_provider(resolved))
+            kwargs["max_tokens"] = min(kwargs.get("max_tokens", new_limit), new_limit)
+            return True
+
+        if self.fallback_model and failed_model != self.fallback_model:
+            logger.warning(f"Model '{failed_model}' not found and no catalog match, switching to fallback")
+            fallback_limit = get_model_max_tokens(self.fallback_model, self.fallback_provider)
+            kwargs["model"] = self.fallback_model
+            kwargs["max_tokens"] = min(kwargs.get("max_tokens", fallback_limit), fallback_limit)
+            return True
+
         return False
 
     def _completion_with_recovery(self, kwargs: dict[str, Any], *, litellm: Any) -> Any:
-        """Call litellm.completion with self-healing retries for BadRequest incompatibilities."""
+        """Call litellm.completion with self-healing retries for BadRequest and NotFound errors."""
         _BadRequestError = getattr(litellm, "BadRequestError", None)
+        _NotFoundError = getattr(litellm, "NotFoundError", None)
         for _ in range(3):
             try:
                 return litellm.completion(**kwargs)
@@ -651,18 +872,25 @@ class LLMClient:
                 if _BadRequestError and isinstance(e, _BadRequestError):
                     if self._apply_bad_request_recovery(kwargs, e):
                         continue
+                if _NotFoundError and isinstance(e, _NotFoundError):
+                    if self._apply_model_not_found_recovery(kwargs, e):
+                        continue
                 raise
         return litellm.completion(**kwargs)
 
     async def _acompletion_with_recovery(self, kwargs: dict[str, Any], *, litellm: Any) -> Any:
         """Async version of _completion_with_recovery."""
         _BadRequestError = getattr(litellm, "BadRequestError", None)
+        _NotFoundError = getattr(litellm, "NotFoundError", None)
         for _ in range(3):
             try:
                 return await litellm.acompletion(**kwargs)
             except Exception as e:
                 if _BadRequestError and isinstance(e, _BadRequestError):
                     if self._apply_bad_request_recovery(kwargs, e):
+                        continue
+                if _NotFoundError and isinstance(e, _NotFoundError):
+                    if self._apply_model_not_found_recovery(kwargs, e):
                         continue
                 raise
         return await litellm.acompletion(**kwargs)

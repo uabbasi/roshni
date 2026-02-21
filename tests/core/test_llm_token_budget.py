@@ -13,6 +13,8 @@ def _isolate_budget(tmp_path, monkeypatch):
     usage_file = str(tmp_path / "token_usage.json")
     monkeypatch.setattr(token_budget, "_usage_path", usage_file)
     monkeypatch.setattr(token_budget, "_DEFAULT_DAILY_LIMIT", 500_000)
+    monkeypatch.setattr(token_budget, "_last_known_budget", None)
+    monkeypatch.setattr(token_budget, "_degraded_warned", set())
 
 
 class TestRecordUsage:

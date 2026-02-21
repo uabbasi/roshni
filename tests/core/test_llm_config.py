@@ -10,6 +10,7 @@ from roshni.core.llm.config import (
     get_default_model,
     get_model_max_tokens,
     infer_provider,
+    resolve_model_name,
 )
 
 
@@ -188,6 +189,54 @@ class TestNewModelConstants:
         # gemini-3 key in MODEL_OUTPUT_TOKEN_LIMITS should match
         assert get_model_max_tokens("gemini-3-pro-preview") == 1048576
         assert get_model_max_tokens("gemini-3-flash-preview") == 1048576
+
+
+class TestResolveModelName:
+    def test_exact_match_returns_catalog_name(self):
+        result = resolve_model_name("anthropic/claude-sonnet-4-6")
+        assert result == "anthropic/claude-sonnet-4-6"
+
+    def test_exact_match_haiku(self):
+        result = resolve_model_name("anthropic/claude-haiku-4-5-20251001")
+        assert result == "anthropic/claude-haiku-4-5-20251001"
+
+    def test_fuzzy_match_claude_haiku_4(self):
+        """The production error case: 'claude-haiku-4' should resolve to a valid model."""
+        result = resolve_model_name("claude-haiku-4")
+        assert result is not None
+        assert "claude-haiku" in result
+        assert "anthropic/" in result
+
+    def test_fuzzy_match_with_provider_prefix(self):
+        result = resolve_model_name("anthropic/claude-haiku-4")
+        assert result is not None
+        assert "claude-haiku" in result
+
+    def test_fuzzy_match_partial_sonnet(self):
+        result = resolve_model_name("claude-sonnet-4")
+        assert result is not None
+        assert "claude-sonnet" in result
+
+    def test_no_match_returns_none(self):
+        result = resolve_model_name("totally-fake-model-xyz-999")
+        assert result is None
+
+    def test_empty_string_returns_none(self):
+        result = resolve_model_name("")
+        assert result is None
+
+    def test_whitespace_only_returns_none(self):
+        result = resolve_model_name("   ")
+        assert result is None
+
+    def test_gemini_partial_match(self):
+        result = resolve_model_name("gemini-3-flash")
+        assert result is not None
+        assert "gemini" in result
+
+    def test_gpt_partial_match(self):
+        result = resolve_model_name("gpt-5.2")
+        assert result is not None
 
 
 class TestProviderEnvMap:

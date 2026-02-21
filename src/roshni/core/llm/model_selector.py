@@ -21,6 +21,7 @@ from .config import (
     get_available_families,
     get_family_models,
 )
+from .model_health import is_model_healthy
 from .token_budget import get_budget_pressure
 
 
@@ -199,12 +200,12 @@ class ModelSelector:
                 f"synthesis={signals.needs_synthesis}, escalation={signals.needs_escalation})"
                 f" -> heavy model: {self.heavy_model.display_name}"
             )
-            return self.heavy_model
+            return self._ensure_healthy(self.heavy_model)
 
         if mode:
             if heavy_modes and mode in heavy_modes:
                 logger.debug(f"Mode '{mode}' in heavy_modes -> heavy model: {self.heavy_model.display_name}")
-                return self.heavy_model
+                return self._ensure_healthy(self.heavy_model)
             if mode.lower() in _LIGHT_MODES:
                 logger.debug(f"Mode '{mode}' -> light model: {self.light_model.display_name}")
                 return self.light_model
@@ -214,13 +215,52 @@ class ModelSelector:
         query_lower = query.lower()
         if len(query) > self._complex_query_chars_threshold or any(kw in query_lower for kw in _COMPLEX_KEYWORDS):
             logger.debug(f"Complex query -> heavy model: {self.heavy_model.display_name}")
-            return self.heavy_model
+            return self._ensure_healthy(self.heavy_model)
 
         if any(kw in query_lower for kw in _LIGHT_KEYWORDS):
             logger.debug(f"Light query -> light model: {self.light_model.display_name}")
-            return self.light_model
+            return self._ensure_healthy(self.light_model)
 
-        return self.light_model
+        return self._ensure_healthy(self.light_model)
+
+    def _ensure_healthy(self, config: ModelConfig) -> ModelConfig:
+        """Return the config if its model is healthy, else find an alternative."""
+        if is_model_healthy(config.name):
+            return config
+        alternative = self._find_healthy_alternative(config)
+        if alternative:
+            logger.info(f"Model {config.display_name} is unhealthy, switching to {alternative.display_name}")
+            return alternative
+        # No healthy alternative — return original and let LLM client handle fallback
+        logger.warning(f"Model {config.display_name} is unhealthy but no healthy alternative found")
+        return config
+
+    def _find_healthy_alternative(self, unhealthy: ModelConfig) -> ModelConfig | None:
+        """Find a healthy model at the same tier from a different provider.
+
+        Checks same-tier models (light/heavy/thinking) from the model catalog.
+        """
+        # Determine which tier we need
+        if unhealthy == self.light_model:
+            candidates = [self.heavy_model, self.thinking_model]
+        elif unhealthy == self.heavy_model:
+            candidates = [self.light_model, self.thinking_model]
+        else:
+            candidates = [self.heavy_model, self.light_model]
+
+        # Try same-tier from different providers in catalog
+        for provider_models in MODEL_CATALOG.values():
+            for model in provider_models:
+                if model.name != unhealthy.name and model.provider != unhealthy.provider:
+                    if model.is_heavy == unhealthy.is_heavy and is_model_healthy(model.name):
+                        return model
+
+        # Fall back to any healthy model from our configured set
+        for candidate in candidates:
+            if is_model_healthy(candidate.name):
+                return candidate
+
+        return None
 
     def get_model_for_task(self, task_type: str, query_mode: str | None = None) -> ModelConfig:
         """Pick light or heavy model based on task type or query mode.

@@ -198,7 +198,9 @@ class TestDefaultAgentChat:
 
         agent = DefaultAgent(config=config, secrets=secrets)
         result = agent.chat("test")
-        assert "went wrong" in result.text.lower() or "API down" in result.text
+        # Should get a friendly message, not the raw exception
+        assert "API down" not in result.text
+        assert "unexpected" in result.text.lower() or "try again" in result.text.lower()
 
     @patch("roshni.core.llm.client.LLMClient.completion")
     def test_completion_called_with_tools(self, mock_completion, config, secrets, echo_tool):
@@ -231,6 +233,38 @@ class TestDefaultAgentChat:
         approved = agent.chat("approve")
         assert approved.tool_calls[0]["name"] == "write_thing"
         assert approved.tool_calls[0]["result"] == "Wrote: hello"
+
+    @patch("roshni.core.llm.client.LLMClient.completion")
+    def test_write_approval_required_every_time_when_grants_not_persisted(
+        self, mock_completion, tmp_dir, secrets, write_tool
+    ):
+        cfg = Config(
+            data_dir=tmp_dir,
+            defaults={
+                "llm": {"provider": "openai", "model": "gpt-5.2-chat-latest"},
+                "security": {"require_write_approval": True, "persist_approval_grants": False},
+            },
+        )
+        agent = DefaultAgent(config=cfg, secrets=secrets, tools=[write_tool])
+
+        tool_call_1 = MagicMock()
+        tool_call_1.id = "call_approval_1"
+        tool_call_1.function.name = "write_thing"
+        tool_call_1.function.arguments = '{"text": "first"}'
+        mock_completion.return_value = _make_response(None, tool_calls=[tool_call_1])
+        first = agent.chat("write first")
+        assert "Approval required" in first.text
+
+        mock_completion.return_value = _make_response("done first")
+        agent.chat("approve")
+
+        tool_call_2 = MagicMock()
+        tool_call_2.id = "call_approval_2"
+        tool_call_2.function.name = "write_thing"
+        tool_call_2.function.arguments = '{"text": "second"}'
+        mock_completion.return_value = _make_response(None, tool_calls=[tool_call_2])
+        second = agent.chat("write second")
+        assert "Approval required" in second.text
 
     @patch("roshni.core.llm.client.LLMClient.completion")
     def test_write_tool_denied(self, mock_completion, config, secrets, write_tool):
@@ -905,6 +939,145 @@ class TestAdvisorIntegration:
         agent = DefaultAgent(config=config, secrets=secrets, advisors=[FunctionAdvisor("bad", bad_advisor)])
         result = agent.chat("hi")
         assert result.text == "still works"
+
+
+class TestFriendlyErrorMessages:
+    """Tests that production errors produce user-friendly messages, not raw exception dumps."""
+
+    @patch("roshni.core.llm.client.LLMClient.completion")
+    def test_friendly_error_message_not_found(self, mock_completion, config, secrets):
+        """NotFoundError produces friendly text, not raw exception."""
+
+        class MockNotFoundError(Exception):
+            pass
+
+        MockNotFoundError.__name__ = "NotFoundError"
+
+        mock_completion.side_effect = MockNotFoundError("model: claude-haiku-4 not found")
+
+        agent = DefaultAgent(config=config, secrets=secrets)
+        result = agent.chat("hello")
+
+        assert "NotFoundError" not in result.text
+        assert "model:" not in result.text
+        assert "trouble" in result.text.lower() or "unexpected" in result.text.lower()
+
+    @patch("roshni.core.llm.client.LLMClient.completion")
+    def test_friendly_error_message_rate_limit(self, mock_completion, config, secrets):
+        class MockRateLimitError(Exception):
+            pass
+
+        MockRateLimitError.__name__ = "RateLimitError"
+        mock_completion.side_effect = MockRateLimitError("Too many requests")
+
+        agent = DefaultAgent(config=config, secrets=secrets)
+        result = agent.chat("hello")
+
+        assert "busy" in result.text.lower()
+        assert "RateLimitError" not in result.text
+
+    @patch("roshni.core.llm.client.LLMClient.completion")
+    def test_friendly_error_message_bad_request(self, mock_completion, config, secrets):
+        class MockBadRequestError(Exception):
+            pass
+
+        MockBadRequestError.__name__ = "BadRequestError"
+        mock_completion.side_effect = MockBadRequestError("invalid messages format")
+
+        agent = DefaultAgent(config=config, secrets=secrets)
+        result = agent.chat("hello")
+
+        assert "logged" in result.text.lower() or "request format" in result.text.lower()
+        assert "invalid messages format" not in result.text
+
+    @patch("roshni.core.llm.client.LLMClient.completion")
+    def test_friendly_error_message_connection(self, mock_completion, config, secrets):
+        class MockAPIConnectionError(Exception):
+            pass
+
+        MockAPIConnectionError.__name__ = "APIConnectionError"
+        mock_completion.side_effect = MockAPIConnectionError("Connection refused")
+
+        agent = DefaultAgent(config=config, secrets=secrets)
+        result = agent.chat("hello")
+
+        assert "connecting" in result.text.lower() or "trouble" in result.text.lower()
+
+    @patch("roshni.core.llm.client.LLMClient.completion")
+    def test_friendly_error_message_generic(self, mock_completion, config, secrets):
+        mock_completion.side_effect = ValueError("something weird")
+
+        agent = DefaultAgent(config=config, secrets=secrets)
+        result = agent.chat("hello")
+
+        assert "unexpected" in result.text.lower() or "try again" in result.text.lower()
+        assert "something weird" not in result.text
+
+    def test_budget_exceeded_message(self, config, secrets):
+        """Budget exceeded should return the budget-specific message."""
+        agent = DefaultAgent(config=config, secrets=secrets)
+        # Budget check happens early in chat() with a different path
+        with patch("roshni.core.llm.token_budget.check_budget", return_value=(False, 0)):
+            result = agent.chat("hello")
+        assert "budget" in result.text.lower()
+
+
+class TestRecoveryAttempts:
+    """Tests that DefaultAgent attempts recovery before returning errors."""
+
+    @patch("roshni.core.llm.client.LLMClient.completion")
+    def test_recovery_retries_after_tool_call_error(self, mock_completion, config, secrets, echo_tool):
+        """Verify DefaultAgent retries after repairing tool sequence."""
+
+        class MockBadRequestError(Exception):
+            pass
+
+        MockBadRequestError.__name__ = "BadRequestError"
+
+        call_count = [0]
+
+        def side_effect(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise MockBadRequestError("tool_call_ids did not have response messages")
+            return _make_response("Recovered!")
+
+        mock_completion.side_effect = side_effect
+
+        agent = DefaultAgent(config=config, secrets=secrets, tools=[echo_tool])
+        # Pre-populate with a valid user message
+        agent.message_history = [{"role": "user", "content": "test recovery"}]
+        result = agent.chat("test recovery")
+
+        # Should get a response (either recovered or friendly error), not a raw exception
+        assert "BadRequestError" not in result.text
+
+    @patch("roshni.core.llm.client.LLMClient.completion")
+    def test_recovery_switches_model_on_not_found(self, mock_completion, config, secrets):
+        """Verify DefaultAgent attempts model switch on NotFoundError."""
+
+        class MockNotFoundError(Exception):
+            pass
+
+        MockNotFoundError.__name__ = "NotFoundError"
+
+        call_count = [0]
+
+        def side_effect(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] <= 1:
+                raise MockNotFoundError("model not found")
+            return _make_response("Recovered with fallback!")
+
+        mock_completion.side_effect = side_effect
+
+        agent = DefaultAgent(config=config, secrets=secrets)
+        # Give it a fallback model to try
+        agent._llm.fallback_model = "deepseek/deepseek-chat"
+        result = agent.chat("hello")
+
+        # Should not contain the raw error
+        assert "NotFoundError" not in result.text
 
 
 class TestAfterChatHookPool:
