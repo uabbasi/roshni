@@ -59,6 +59,36 @@ async def test_wildcard_hooks_receive_all_events():
 
 
 # ---------------------------------------------------------------------------
+# 2b. off_all — unregister wildcard hooks
+# ---------------------------------------------------------------------------
+
+
+async def test_off_all_removes_wildcard_hook():
+    bus = EventBus()
+    received: list[str] = []
+
+    def wildcard(event: Event) -> None:
+        received.append(event.name)
+
+    bus.on_all(wildcard)
+    await bus.emit(Event(name="before"))
+    assert received == ["before"]
+
+    bus.off_all(wildcard)
+    await bus.emit(Event(name="after"))
+    assert received == ["before"]  # still 1 — hook was removed
+
+
+async def test_off_all_with_unregistered_hook_does_not_raise():
+    bus = EventBus()
+
+    def never_registered(event: Event) -> None:
+        pass  # pragma: no cover
+
+    bus.off_all(never_registered)  # should not raise
+
+
+# ---------------------------------------------------------------------------
 # 3. emit_sync fires sync hooks
 # ---------------------------------------------------------------------------
 
