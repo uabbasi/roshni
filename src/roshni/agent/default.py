@@ -367,7 +367,14 @@ class DefaultAgent(BaseAgent):
         message_text = self._extract_text(message) if isinstance(message, list) else message
 
         tool_call_log: list[dict[str, Any]] = []
-        max_followups = int(kwargs.get("max_followups", 3))
+        # Non-user channels (boot, heartbeat) must not drain follow-ups —
+        # those messages belong to the user's conversational context and would
+        # be silently consumed in the wrong prompt/suppression context.
+        _non_user_channels = {"boot", "heartbeat"}
+        if channel in _non_user_channels:
+            max_followups = 0
+        else:
+            max_followups = int(kwargs.get("max_followups", 3))
         clear_history = call_type in ("heartbeat", "scheduled")
 
         # Session: lazily create on first chat()
