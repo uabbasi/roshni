@@ -17,8 +17,16 @@ class MockAgent(BaseAgent):
         self.response = response
         self.calls: list[dict] = []
 
-    def chat(self, message, *, mode=None, call_type=None, channel=None, max_iterations=5, **kwargs):
-        self.calls.append({"message": message, "call_type": call_type, "channel": channel, "mode": mode})
+    def chat(self, message, *, mode=None, call_type=None, channel=None, chat_id=None, max_iterations=5, **kwargs):
+        self.calls.append(
+            {
+                "message": message,
+                "call_type": call_type,
+                "channel": channel,
+                "chat_id": chat_id,
+                "mode": mode,
+            }
+        )
         return ChatResult(text=self.response)
 
 
@@ -211,5 +219,34 @@ class TestEventGateway:
         task1 = gw._consumer_task
         gw.start()  # Should not create a new task
         assert gw._consumer_task is task1
+
+        await gw.stop()
+
+    async def test_chat_id_passed_to_agent(self):
+        """chat_id on the event should be forwarded to agent.invoke()."""
+        agent = MockAgent(response="ok")
+        gw = EventGateway(agent=agent)
+        gw.start()
+
+        event = GatewayEvent.message("hi", user_id="u1", channel="telegram", chat_id="group-42")
+        await gw.submit(event)
+        result = await asyncio.wait_for(event._response_future, timeout=5.0)
+
+        assert result == "ok"
+        assert agent.calls[0]["chat_id"] == "group-42"
+
+        await gw.stop()
+
+    async def test_empty_chat_id_passed_as_none(self):
+        """Empty chat_id string should be passed as None to agent."""
+        agent = MockAgent(response="ok")
+        gw = EventGateway(agent=agent)
+        gw.start()
+
+        event = GatewayEvent.message("hi", user_id="u1", channel="test")
+        await gw.submit(event)
+        await asyncio.wait_for(event._response_future, timeout=5.0)
+
+        assert agent.calls[0]["chat_id"] is None
 
         await gw.stop()

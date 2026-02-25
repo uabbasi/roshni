@@ -98,3 +98,11 @@ class TestTelegramGatewayInit:
         gw = TelegramGateway(agent=agent, bot_token="fake")
         result = await gw.handle_message("hello", "user1")
         assert result == "Bot says hi"
+
+    @pytest.mark.asyncio
+    async def test_handle_message_with_chat_id(self):
+        agent = MockAgent()
+        agent.response = "Bot says hi"
+        gw = TelegramGateway(agent=agent, bot_token="fake")
+        result = await gw.handle_message("hello", "user1", chat_id="group-42")
+        assert result == "Bot says hi"

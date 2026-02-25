@@ -105,6 +105,7 @@ class BaseAgent(ABC):
         mode: str | None = None,
         call_type: str | None = None,
         channel: str | None = None,
+        chat_id: str | None = None,
         max_iterations: int = 5,
         on_tool_start: Callable[[str, int, dict | None], None] | None = None,
         on_stream: Callable[[str], None] | None = None,
@@ -119,6 +120,9 @@ class BaseAgent(ABC):
                 ``"scheduled"``).  Implementations may use this to adjust
                 behavior such as skipping conversation history.
             channel: Channel identifier (telegram, cli, etc.).
+            chat_id: Conversation identifier for multi-conversation support.
+                When provided with a ConversationManager, isolates message
+                history per chat (e.g. per Telegram chat/group).
             max_iterations: Max tool-call rounds.
             on_tool_start: Progress callback ``(tool_name, index, args)``.
             on_stream: Optional callback for streaming content deltas.
@@ -136,6 +140,7 @@ class BaseAgent(ABC):
         mode: str | None = None,
         call_type: str | None = None,
         channel: str | None = None,
+        chat_id: str | None = None,
         on_tool_start: Callable[[str, int, dict | None], None] | None = None,
         on_stream: Callable[[str], None] | None = None,
         **kwargs: Any,
@@ -154,6 +159,7 @@ class BaseAgent(ABC):
                 mode=mode,
                 call_type=call_type,
                 channel=channel,
+                chat_id=chat_id,
                 on_tool_start=on_tool_start,
                 on_stream=on_stream,
                 **kwargs,
@@ -161,5 +167,10 @@ class BaseAgent(ABC):
         )
         return result.text
 
-    def clear_history(self) -> None:  # noqa: B027
-        """Clear conversation history. Override in subclasses with state."""
+    def clear_history(self, chat_id: str | None = None) -> None:  # noqa: B027
+        """Clear conversation history. Override in subclasses with state.
+
+        Args:
+            chat_id: If provided, clear only this conversation's history.
+                If ``None``, clear all history (backward-compatible default).
+        """

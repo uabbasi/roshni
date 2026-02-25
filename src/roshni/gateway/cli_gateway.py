@@ -73,7 +73,7 @@ class CliGateway(BotGateway):
             console.print(Markdown(response))
             console.print()
 
-    async def handle_message(self, message: str, user_id: str) -> str:
+    async def handle_message(self, message: str, user_id: str, *, chat_id: str | None = None) -> str:
         """Send message to agent and return response."""
         return await self.agent.invoke(message)
 

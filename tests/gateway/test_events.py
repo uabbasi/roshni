@@ -20,6 +20,7 @@ class TestGatewayEvent:
         assert event.channel is None
         assert event.mode is None
         assert event.user_id == ""
+        assert event.chat_id == ""
         assert event.metadata == {}
         assert event._response_future is None
 
@@ -74,6 +75,14 @@ class TestMessageFactory:
     async def test_metadata_passthrough(self):
         event = GatewayEvent.message("hi", user_id="u1", metadata={"key": "val"})
         assert event.metadata == {"key": "val"}
+
+    async def test_chat_id_passthrough(self):
+        event = GatewayEvent.message("hi", user_id="u1", chat_id="group-42")
+        assert event.chat_id == "group-42"
+
+    async def test_chat_id_defaults_to_empty(self):
+        event = GatewayEvent.message("hi", user_id="u1")
+        assert event.chat_id == ""
 
 
 @pytest.mark.smoke

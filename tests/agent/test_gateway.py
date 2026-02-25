@@ -15,7 +15,7 @@ class StubGateway(BotGateway):
     async def start(self):
         self.started = True
 
-    async def handle_message(self, message: str, user_id: str) -> str:
+    async def handle_message(self, message: str, user_id: str, *, chat_id: str | None = None) -> str:
         return f"reply to {user_id}: {message}"
 
     async def stop(self):
