@@ -89,6 +89,13 @@ class EventBus:
         except ValueError:
             pass
 
+    def off_all(self, hook: Hook) -> None:
+        """Unregister a wildcard *hook* previously registered with :meth:`on_all`."""
+        try:
+            self._wildcard_hooks.remove(hook)
+        except ValueError:
+            pass
+
     async def emit(self, event: Event) -> None:
         """Emit an event, running all matching hooks (async)."""
         hooks = list(self._hooks.get(event.name, []))

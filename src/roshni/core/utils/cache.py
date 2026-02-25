@@ -39,7 +39,10 @@ class Cache:
             )
 
     def get_cached_data(self, key: str) -> Any | None:
-        """Retrieve cached data if not expired."""
+        """Retrieve cached data if not expired.
+
+        Automatically removes the cache file if the entry has expired.
+        """
         cache_file = os.path.join(self.cache_dir, f"{key}.pkl")
         if not os.path.exists(cache_file):
             return None
@@ -47,7 +50,32 @@ class Cache:
             cached = pickle.load(f)
             if cached["expiry"] > datetime.now().timestamp():
                 return cached["data"]
+        # Entry expired — clean up the stale file
+        os.remove(cache_file)
         return None
+
+    def cleanup_expired(self) -> int:
+        """Remove all expired cache entries from disk.
+
+        Returns:
+            Number of expired entries removed.
+        """
+        removed = 0
+        for filename in os.listdir(self.cache_dir):
+            if not filename.endswith(".pkl"):
+                continue
+            filepath = os.path.join(self.cache_dir, filename)
+            try:
+                with open(filepath, "rb") as f:
+                    cached = pickle.load(f)
+                if cached["expiry"] <= datetime.now().timestamp():
+                    os.remove(filepath)
+                    removed += 1
+            except (pickle.UnpicklingError, KeyError, OSError):
+                # Corrupted file — remove it too
+                os.remove(filepath)
+                removed += 1
+        return removed
 
     def clear_cache(self, key: str | None = None) -> None:
         """Clear a specific key or all cached data."""
@@ -77,3 +105,8 @@ def get_cached_data(key: str, cache_dir: str | None = None) -> Any | None:
 def clear_cache(key: str | None = None, cache_dir: str | None = None) -> None:
     """Clear cache for a specific key or all keys."""
     Cache(cache_dir=cache_dir).clear_cache(key)
+
+
+def cleanup_expired(cache_dir: str | None = None) -> int:
+    """Remove all expired cache entries from disk."""
+    return Cache(cache_dir=cache_dir).cleanup_expired()
