@@ -55,6 +55,7 @@ class GatewayEvent:
     channel: str | None = None
     mode: str | None = None
     user_id: str = ""
+    chat_id: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
     _response_future: asyncio.Future | None = field(default=None, repr=False, compare=False)
 
@@ -73,6 +74,7 @@ class GatewayEvent:
         user_id: str,
         channel: str | None = None,
         *,
+        chat_id: str = "",
         mode: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> GatewayEvent:
@@ -86,6 +88,7 @@ class GatewayEvent:
             channel=channel,
             mode=mode,
             user_id=user_id,
+            chat_id=chat_id,
             metadata=metadata or {},
             _response_future=loop.create_future(),
         )

@@ -116,6 +116,7 @@ class DefaultAgent(BaseAgent):
         after_chat_hooks: list[AfterChatHook] | None = None,
         circuit_breaker: Any | None = None,
         persona_factory: Callable[[str | None], str] | None = None,
+        conversation_manager: Any | None = None,
     ):
         super().__init__(name=name)
 
@@ -173,6 +174,7 @@ class DefaultAgent(BaseAgent):
         self._configure_model_selector_from_config()
 
         self.message_history: list[dict[str, Any]] = []
+        self._conversation_manager = conversation_manager
         self._pending_approval: dict[str, Any] | None = None
         self._require_write_approval = bool(config.get("security.require_write_approval", True))
         self._persist_approval_grants = bool(config.get("security.persist_approval_grants", True))
@@ -317,6 +319,7 @@ class DefaultAgent(BaseAgent):
         mode: str | None = None,
         call_type: str | None = None,
         channel: str | None = None,
+        chat_id: str | None = None,
         max_iterations: int = 5,
         on_tool_start: Callable[[str, int, dict | None], None] | None = None,
         on_stream: Callable[[str], None] | None = None,
@@ -348,6 +351,15 @@ class DefaultAgent(BaseAgent):
                 model=self.model,
             )
 
+        # Multi-conversation: swap in per-chat history if ConversationManager is active
+        _cm_active = self._conversation_manager is not None and chat_id is not None
+        if _cm_active:
+            self.message_history = self._conversation_manager.get_history(chat_id)
+            # Per-chat session ID
+            stored_sid = self._conversation_manager.get_session_id(chat_id)
+            if stored_sid:
+                self._active_session_id = stored_sid
+
         # Validate history before processing (catches corruption from restarts/crashes)
         self._validate_history()
 
@@ -363,6 +375,8 @@ class DefaultAgent(BaseAgent):
             session = Session(agent_name=self.name, channel=channel or "")
             self._session_store.create_session(session)
             self._active_session_id = session.id
+            if _cm_active:
+                self._conversation_manager.set_session_id(chat_id, session.id)
 
         # Emit AGENT_CHAT_START
         if self._event_bus:
@@ -545,11 +559,22 @@ class DefaultAgent(BaseAgent):
                 model=locals().get("actual_model", self.model),
             )
         finally:
+            # Multi-conversation: save per-chat history back to manager
+            if _cm_active:
+                self._conversation_manager.save_history(chat_id, self.message_history)
             self._busy.clear()
 
-    def clear_history(self) -> None:
-        """Clear conversation history."""
-        self.message_history = []
+    def clear_history(self, chat_id: str | None = None) -> None:
+        """Clear conversation history.
+
+        Args:
+            chat_id: If provided and a ConversationManager is active, clear
+                only this conversation.  Otherwise clear all history.
+        """
+        if chat_id is not None and self._conversation_manager is not None:
+            self._conversation_manager.clear_history(chat_id)
+        else:
+            self.message_history = []
         self._pending_approval = None
 
     # ------------------------------------------------------------------

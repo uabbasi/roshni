@@ -132,6 +132,7 @@ class EventGateway:
                 event.message,
                 call_type=event.call_type,
                 channel=event.channel,
+                chat_id=event.chat_id or None,
                 mode=event.mode,
             )
         except Exception as exc:

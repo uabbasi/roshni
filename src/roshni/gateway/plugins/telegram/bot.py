@@ -179,7 +179,8 @@ class TelegramGateway(BotGateway):
                 return
             if not gateway._is_authorized(update.effective_user.id):
                 return
-            agent.clear_history()
+            chat_id = str(update.effective_chat.id) if update.effective_chat else None
+            agent.clear_history(chat_id=chat_id)
             await update.message.reply_text("Conversation cleared. Fresh start!")
 
         async def keep_typing(chat_id: int, bot, stop_event: asyncio.Event) -> None:
@@ -209,14 +210,15 @@ class TelegramGateway(BotGateway):
             if not message_text:
                 return
 
-            logger.info(f"Telegram [{user_id}]: {message_text[:80]}")
+            chat_id = str(update.effective_chat.id) if update.effective_chat else str(user_id)
+            logger.info(f"Telegram [{user_id}@{chat_id}]: {message_text[:80]}")
 
             # Typing indicator
             stop_typing = asyncio.Event()
             typing_task = asyncio.create_task(keep_typing(update.effective_chat.id, context.bot, stop_typing))
 
             try:
-                response = await gateway.handle_message(message_text, str(user_id))
+                response = await gateway.handle_message(message_text, str(user_id), chat_id=chat_id)
 
                 stop_typing.set()
                 await typing_task
@@ -282,15 +284,15 @@ class TelegramGateway(BotGateway):
         await stop_event.wait()
         await self.stop()
 
-    async def handle_message(self, message: str, user_id: str) -> str:
+    async def handle_message(self, message: str, user_id: str, *, chat_id: str | None = None) -> str:
         """Route a message through the agent (or event gateway if wired)."""
         if self._event_gateway:
             from roshni.gateway.events import GatewayEvent
 
-            event = GatewayEvent.message(message, user_id=user_id, channel="telegram")
+            event = GatewayEvent.message(message, user_id=user_id, channel="telegram", chat_id=chat_id or "")
             await self._event_gateway.submit(event)
             return await event._response_future
-        return await self.agent.invoke(message)
+        return await self.agent.invoke(message, chat_id=chat_id)
 
     async def send_proactive(self, text: str, user_id: int | str | None = None) -> None:
         """Send an unsolicited message (e.g. heartbeat response) to a user.

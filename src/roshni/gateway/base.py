@@ -40,12 +40,16 @@ class BotGateway(ABC):
         """Start the gateway (connect to platform, begin listening)."""
 
     @abstractmethod
-    async def handle_message(self, message: str, user_id: str) -> str:
+    async def handle_message(self, message: str, user_id: str, *, chat_id: str | None = None) -> str:
         """Handle an incoming message and return a response.
 
         Args:
             message: User message text.
             user_id: Platform-specific user identifier.
+            chat_id: Conversation identifier for multi-conversation support.
+                In Telegram this is the chat ID (different from user_id in
+                groups/channels).  When ``None``, falls back to single-
+                conversation behavior.
 
         Returns:
             Response text to send back to the user.
