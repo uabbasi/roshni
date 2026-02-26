@@ -14,9 +14,16 @@ from .persona import get_system_prompt
 from .router import CommandParseResult, Router, RouteResult
 from .session import JSONLSessionStore, Session, SessionStore, Turn
 
+# Optional: Agent SDK integration (requires `pip install claude-agent-sdk`)
+try:
+    from .agent_sdk import AgentSDKAgent
+except ImportError:
+    AgentSDKAgent = None  # type: ignore[assignment,misc]
+
 __all__ = [
     "Advisor",
     "AfterChatHook",
+    "AgentSDKAgent",
     "BaseAgent",
     "ChatResult",
     "CircuitBreaker",
