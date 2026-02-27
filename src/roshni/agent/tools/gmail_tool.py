@@ -2,6 +2,7 @@
 
 Safety-first behavior:
   - Always supports local draft creation.
+  - Checking email (read-only) is enabled when credentials exist.
   - Sending is optional and disabled by default.
 """
 
@@ -57,6 +58,37 @@ def _create_email_draft(
     return f"Draft saved: {path}"
 
 
+def _check_email(
+    *,
+    address: str = "",
+    app_password: str = "",
+    count: int = 10,
+    unread_only: bool = False,
+) -> str:
+    """Fetch recent emails via Gmail IMAP."""
+    from roshni.integrations.gmail import GmailReader
+
+    try:
+        reader = GmailReader(address=address, app_password=app_password)
+        emails = reader.fetch_recent(count=count, unread_only=unread_only)
+        if not emails:
+            return "No emails found." if not unread_only else "No unread emails."
+
+        lines: list[str] = []
+        for i, msg in enumerate(emails, 1):
+            unread_marker = " [UNREAD]" if msg["unread"] == "yes" else ""
+            lines.append(f"**{i}. {msg['subject']}**{unread_marker}")
+            lines.append(f"   From: {msg['from']}")
+            lines.append(f"   Date: {msg['date']}")
+            if msg["snippet"]:
+                lines.append(f"   Preview: {msg['snippet']}")
+            lines.append("")
+
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Failed to check email: {e}"
+
+
 def _send_email(
     recipient: str,
     subject: str,
@@ -86,6 +118,44 @@ def create_gmail_tools(
 
     gmail_cfg = config.get("integrations.gmail", {}) or {}
     drafts_dir = config.get("paths.email_drafts_dir", "~/.roshni/drafts/email")
+
+    # Check email tool — available when credentials exist
+    address = secrets.get("gmail.address", "")
+    app_password = secrets.get("gmail.app_password", "")
+    if address and app_password:
+        tools.append(
+            ToolDefinition(
+                name="check_email",
+                description=(
+                    "Check the user's Gmail inbox. Returns recent emails with subject, sender, date, "
+                    "and a short preview. Can filter to unread only."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "count": {
+                            "type": "integer",
+                            "description": "Number of recent emails to fetch (default 10, max 25)",
+                        },
+                        "unread_only": {
+                            "type": "boolean",
+                            "description": "If true, only show unread emails",
+                        },
+                    },
+                    "required": [],
+                },
+                function=lambda count=10, unread_only=False: _check_email(
+                    address=address,
+                    app_password=app_password,
+                    count=min(int(count), 25),
+                    unread_only=bool(unread_only),
+                ),
+                permission="read",
+                requires_approval=False,
+                timeout=30.0,
+                service_name="gmail",
+            )
+        )
 
     tools.append(
         ToolDefinition(
@@ -119,8 +189,6 @@ def create_gmail_tools(
     )
 
     allow_send = bool(gmail_cfg.get("allow_send", False))
-    address = secrets.get("gmail.address", "")
-    app_password = secrets.get("gmail.app_password", "")
     if allow_send and address and app_password:
         tools.append(
             ToolDefinition(
