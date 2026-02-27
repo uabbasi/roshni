@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from roshni.integrations.gmail import GmailSender
+from roshni.integrations.gmail import GmailReader, GmailSender
 
 
 class TestGmailSender:
@@ -82,3 +82,85 @@ class TestGmailSender:
         sender = GmailSender(sender="me@gmail.com", app_password="wrong")
         with pytest.raises(smtplib.SMTPAuthenticationError):
             sender.send("you@gmail.com", "Test", "<p>Hi</p>")
+
+
+class TestGmailReader:
+    def test_init_requires_credentials(self):
+        with pytest.raises(ValueError, match="address and app_password are required"):
+            GmailReader(address="", app_password="pass")
+
+        with pytest.raises(ValueError, match="address and app_password are required"):
+            GmailReader(address="me@gmail.com", app_password="")
+
+    def test_init_defaults(self):
+        reader = GmailReader(address="me@gmail.com", app_password="secret")
+        assert reader.imap_server == "imap.gmail.com"
+        assert reader.imap_port == 993
+
+    def test_init_custom_server(self):
+        reader = GmailReader(
+            address="me@gmail.com",
+            app_password="secret",
+            imap_server="imap.custom.com",
+            imap_port=143,
+        )
+        assert reader.imap_server == "imap.custom.com"
+        assert reader.imap_port == 143
+
+    @patch("roshni.integrations.gmail.imaplib.IMAP4_SSL")
+    def test_fetch_recent_returns_emails(self, mock_imap_cls):
+        mock_conn = MagicMock()
+        mock_imap_cls.return_value = mock_conn
+        mock_conn.login.return_value = ("OK", [])
+        mock_conn.select.return_value = ("OK", [b"3"])
+        mock_conn.search.return_value = ("OK", [b"1 2 3"])
+
+        # Build a simple RFC822 email message
+        from email.mime.text import MIMEText
+
+        msg = MIMEText("Hello, this is the body.")
+        msg["From"] = "sender@example.com"
+        msg["To"] = "me@gmail.com"
+        msg["Subject"] = "Test Subject"
+        msg["Date"] = "Thu, 27 Feb 2026 10:00:00 +0000"
+        raw = msg.as_bytes()
+
+        # IMAP fetch returns (flags_line, raw_email) tuples
+        mock_conn.fetch.return_value = ("OK", [(b"1 (FLAGS (\\Seen) RFC822 {1234})", raw)])
+
+        reader = GmailReader(address="me@gmail.com", app_password="secret")
+        results = reader.fetch_recent(count=2)
+
+        assert len(results) == 2
+        assert results[0]["from"] == "sender@example.com"
+        assert results[0]["subject"] == "Test Subject"
+        assert "Hello" in results[0]["snippet"]
+        assert results[0]["unread"] == "no"  # \Seen flag present
+
+    @patch("roshni.integrations.gmail.imaplib.IMAP4_SSL")
+    def test_fetch_recent_empty_inbox(self, mock_imap_cls):
+        mock_conn = MagicMock()
+        mock_imap_cls.return_value = mock_conn
+        mock_conn.login.return_value = ("OK", [])
+        mock_conn.select.return_value = ("OK", [b"0"])
+        mock_conn.search.return_value = ("OK", [b""])
+
+        reader = GmailReader(address="me@gmail.com", app_password="secret")
+        results = reader.fetch_recent()
+
+        assert results == []
+
+    @patch("roshni.integrations.gmail.imaplib.IMAP4_SSL")
+    def test_fetch_unread_only(self, mock_imap_cls):
+        mock_conn = MagicMock()
+        mock_imap_cls.return_value = mock_conn
+        mock_conn.login.return_value = ("OK", [])
+        mock_conn.select.return_value = ("OK", [b"5"])
+        mock_conn.search.return_value = ("OK", [b""])
+
+        reader = GmailReader(address="me@gmail.com", app_password="secret")
+        results = reader.fetch_recent(unread_only=True)
+
+        # Verify UNSEEN criteria was used
+        mock_conn.search.assert_called_once_with(None, "UNSEEN")
+        assert results == []
