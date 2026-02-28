@@ -12,7 +12,7 @@ from enum import IntEnum
 
 LOCAL_MODEL = "ollama/deepseek-r1"
 GOOGLE_MODEL = "gemini/gemini-2.5-flash"
-GOOGLE_PRO_MODEL = "gemini/gemini-3-pro-preview"
+GOOGLE_PRO_MODEL = "gemini/gemini-3.1-pro-preview"
 GOOGLE_FLASH_MODEL = "gemini/gemini-3-flash-preview"
 OPENAI_MODEL = "gpt-5.2-chat-latest"
 ANTHROPIC_MODEL = "anthropic/claude-sonnet-4-6"
@@ -136,7 +136,7 @@ MODEL_CATALOG: dict[str, list[ModelConfig]] = {
     ],
     "gemini": [
         ModelConfig("gemini/gemini-3-flash-preview", "Gemini 3 Flash", "gemini", False, False, 1048576, "low"),
-        ModelConfig("gemini/gemini-3-pro-preview", "Gemini 3 Pro", "gemini", True, False, 1048576, "medium"),
+        ModelConfig("gemini/gemini-3.1-pro-preview", "Gemini 3.1 Pro", "gemini", True, False, 1048576, "medium"),
         ModelConfig("gemini/gemini-2.5-pro", "Gemini 2.5 Pro (Thinking)", "gemini", True, True, 64000, "medium"),
     ],
     "deepseek": [
