@@ -1,7 +1,8 @@
 """Google Workspace ToolDefinition factory (registration/schema layer).
 
-Incremental split: app layers can inject concrete implementations while reusing
-the canonical tool schemas and descriptions here.
+Covers Calendar, Docs, Sheets, and Drive tools.  Gmail tools are in
+``gmail_tool.py`` — they share the same OAuth credentials but have a
+separate factory with IMAP/SMTP fallback logic.
 """
 
 from __future__ import annotations
@@ -31,30 +32,6 @@ class CreateCalendarEventInput(BaseModel):
     )
 
 
-class SearchGmailInput(BaseModel):
-    query: str = Field(description="Gmail search query (same syntax as Gmail search box)")
-    max_results: int = Field(default=10, description="Maximum number of messages to return")
-
-
-class CreateGmailDraftInput(BaseModel):
-    to: str = Field(description="Recipient email address")
-    subject: str = Field(description="Email subject")
-    body: str = Field(description="Email body (plain text)")
-
-
-class CreateGmailReplyDraftInput(BaseModel):
-    message_id: str = Field(description="Gmail message ID to reply to")
-    body: str = Field(description="Reply body (plain text)")
-    subject_override: str = Field(
-        default="",
-        description="Optional subject override. Leave empty to auto-prefix original subject with Re: if needed.",
-    )
-
-
-class GetGmailSummaryInput(BaseModel):
-    pass
-
-
 class ReadGoogleDocInput(BaseModel):
     doc_id: str = Field(description="Google Doc ID (from URL: docs.google.com/document/d/{DOC_ID}/edit)")
 
@@ -79,8 +56,7 @@ def create_google_workspace_tools(functions: dict[str, Callable[..., str]]) -> l
     """Create Google Workspace tools from injected implementations.
 
     Required keys:
-      get_calendar_events, create_calendar_event, search_gmail, create_gmail_draft,
-      create_gmail_reply_draft, get_gmail_summary, read_google_doc,
+      get_calendar_events, create_calendar_event, read_google_doc,
       read_google_sheet, search_google_drive
     """
     f = functions
@@ -105,50 +81,6 @@ def create_google_workspace_tools(functions: dict[str, Callable[..., str]]) -> l
             ),
             args_schema=CreateCalendarEventInput,
             permission="write",
-        ),
-        ToolDefinition.from_function(
-            func=f["search_gmail"],
-            name="search_gmail",
-            description=(
-                "Search Gmail messages using Gmail search syntax. "
-                "Examples: 'from:boss@company.com', 'subject:invoice', 'is:unread after:2026/01/01'. "
-                "Returns subject, sender, date, and snippet for each message."
-            ),
-            args_schema=SearchGmailInput,
-        ),
-        ToolDefinition.from_function(
-            func=f["create_gmail_draft"],
-            name="create_gmail_draft",
-            description=(
-                "Create a NEW Gmail draft (starts a new thread). "
-                "Use this when composing a brand-new email. "
-                "For replies to an existing message, use create_gmail_reply_draft instead."
-            ),
-            args_schema=CreateGmailDraftInput,
-            permission="send",
-            requires_approval=False,
-        ),
-        ToolDefinition.from_function(
-            func=f["create_gmail_reply_draft"],
-            name="create_gmail_reply_draft",
-            description=(
-                "Create a Gmail REPLY draft in an existing thread using a specific message_id. "
-                "Use this when the user asks to reply/follow up on an existing email."
-            ),
-            args_schema=CreateGmailReplyDraftInput,
-            permission="send",
-            requires_approval=False,
-        ),
-        ToolDefinition.from_function(
-            func=f["get_gmail_summary"],
-            name="get_gmail_summary",
-            description=(
-                "Get Gmail inbox summary with two buckets: "
-                "starred_unread (always surface to user) and important_unread (triage for urgency — "
-                "only surface if time-sensitive, action-required, or financial/medical/legal). "
-                "Use for: 'any new email', 'inbox summary', 'urgent messages'"
-            ),
-            args_schema=GetGmailSummaryInput,
         ),
         ToolDefinition.from_function(
             func=f["read_google_doc"],

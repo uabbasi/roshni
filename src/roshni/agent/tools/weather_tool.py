@@ -25,4 +25,3 @@ def create_weather_tools(get_weather_now_fn: Callable[..., str]) -> list[ToolDef
 
 
 __all__ = ["create_weather_tools"]
-

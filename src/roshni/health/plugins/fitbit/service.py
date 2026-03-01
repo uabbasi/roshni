@@ -112,8 +112,7 @@ def fetch_fitbit_day_data(
         fairly = summary.get("fairlyActiveMinutes", 0)
         very = summary.get("veryActiveMinutes", 0)
         distances = [
-            {"activity": d.get("activity", ""), "distance": d.get("distance", 0)}
-            for d in summary.get("distances", [])
+            {"activity": d.get("activity", ""), "distance": d.get("distance", 0)} for d in summary.get("distances", [])
         ]
         result["activity"] = {
             "steps": summary.get("steps"),
@@ -131,8 +130,7 @@ def fetch_fitbit_day_data(
     if hr_raw and hr_raw.get("activities-heart"):
         hr_entry = hr_raw["activities-heart"][0].get("value", {})
         hr_zones = [
-            {"name": z.get("name", ""), "minutes": z.get("minutes", 0)}
-            for z in hr_entry.get("heartRateZones", [])
+            {"name": z.get("name", ""), "minutes": z.get("minutes", 0)} for z in hr_entry.get("heartRateZones", [])
         ]
         if hr_zones:
             result.setdefault("activity", {})["heart_rate_zones"] = hr_zones
@@ -230,4 +228,3 @@ def fetch_fitbit_day_data(
 
 
 __all__ = ["API_ENDPOINT", "PACIFIC_TZ", "compute_step_pace", "fetch_fitbit_day_data", "resolve_target_date"]
-

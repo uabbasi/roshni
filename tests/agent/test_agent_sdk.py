@@ -42,9 +42,21 @@ def _build_mock_sdk():
         def __init__(self, content=None):
             self.content = content or []
 
+    class MockResultMessage:
+        def __init__(self, result=None):
+            self.result = result
+            self.subtype = "result"
+            self.duration_ms = 100
+            self.is_error = False
+            self.num_turns = 1
+            self.session_id = "test"
+            self.total_cost_usd = 0.01
+            self.usage = {}
+
     sdk.TextBlock = MockTextBlock
     sdk.ToolUseBlock = MockToolUseBlock
     sdk.AssistantMessage = MockAssistantMessage
+    sdk.ResultMessage = MockResultMessage
 
     # query() — async generator
     async def mock_query(prompt="", options=None):
@@ -218,6 +230,19 @@ class TestAgentSDKAgentInit:
         agent = AgentSDKAgent(config=config, secrets=secrets, max_turns=10)
         assert agent._max_turns == 10
 
+    def test_model_parameter(self, config, secrets):
+        from roshni.agent.agent_sdk import AgentSDKAgent
+
+        agent = AgentSDKAgent(config=config, secrets=secrets, model="sonnet")
+        assert agent.model == "sonnet"
+        assert agent._model == "sonnet"
+
+    def test_model_default(self, config, secrets):
+        from roshni.agent.agent_sdk import AgentSDKAgent
+
+        agent = AgentSDKAgent(config=config, secrets=secrets)
+        assert agent.model == "claude-agent-sdk"
+
 
 class TestAgentSDKAgentChat:
     def test_simple_chat(self, config, secrets):
@@ -342,6 +367,18 @@ class TestAgentSDKMessageExtraction:
         msg = MagicMock(spec=[])
         assert _extract_text_from_sdk_message(msg) == ""
 
+    def test_extract_text_from_result_message(self):
+        from roshni.agent.agent_sdk import _extract_text_from_sdk_message
+
+        msg = _mock_sdk.ResultMessage(result="Final answer here")
+        assert _extract_text_from_sdk_message(msg) == "Final answer here"
+
+    def test_extract_text_from_result_message_none(self):
+        from roshni.agent.agent_sdk import _extract_text_from_sdk_message
+
+        msg = _mock_sdk.ResultMessage(result=None)
+        assert _extract_text_from_sdk_message(msg) == ""
+
     def test_extract_tool_calls(self):
         from roshni.agent.agent_sdk import _extract_tool_calls_from_sdk_message
 
@@ -377,12 +414,27 @@ class TestImportError:
     def test_import_error_without_sdk(self, config, secrets):
         """AgentSDKAgent raises ImportError when claude_agent_sdk is missing."""
         saved = sys.modules.pop("claude_agent_sdk", None)
+        # Insert a sentinel that makes `import claude_agent_sdk` raise
+        sys.modules["claude_agent_sdk"] = None  # type: ignore[assignment]
         try:
-            # Re-import to trigger the ImportError in __init__
-            from roshni.agent.agent_sdk import AgentSDKAgent
+            # Force re-import of agent_sdk so it picks up the missing module
+            import importlib
+
+            import roshni.agent.agent_sdk as mod
+
+            importlib.reload(mod)
 
             with pytest.raises(ImportError, match="claude-agent-sdk"):
-                AgentSDKAgent(config=config, secrets=secrets)
+                mod.AgentSDKAgent(config=config, secrets=secrets)
         finally:
+            sys.modules.pop("claude_agent_sdk", None)
             if saved is not None:
                 sys.modules["claude_agent_sdk"] = saved
+            else:
+                # Restore real module if it was freshly importable
+                try:
+                    import claude_agent_sdk
+
+                    sys.modules["claude_agent_sdk"] = claude_agent_sdk
+                except ImportError:
+                    pass

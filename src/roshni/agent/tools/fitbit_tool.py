@@ -38,4 +38,3 @@ def create_fitbit_tools(get_fitbit_data_fn: Callable[..., str]) -> list[ToolDefi
 
 
 __all__ = ["create_fitbit_tools"]
-

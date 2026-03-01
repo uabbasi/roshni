@@ -7,8 +7,10 @@ tool use via in-process MCP servers.
 Requires:
     pip install claude-agent-sdk
 
-The Claude Agent SDK bundles the Claude Code CLI automatically.
-An ``ANTHROPIC_API_KEY`` environment variable must be set.
+The Claude Agent SDK wraps the Claude Code CLI.  Authentication is
+inherited from Claude Code's own login — typically an OAuth token
+obtained via ``claude login``.  No ``ANTHROPIC_API_KEY`` is needed
+unless you explicitly want to use an API key instead.
 """
 
 from __future__ import annotations
@@ -139,6 +141,7 @@ class AgentSDKAgent(BaseAgent):
         max_turns: int = 5,
         cwd: str | None = None,
         permission_mode: str | None = None,
+        model: str | None = None,
     ):
         super().__init__(name=name)
 
@@ -151,6 +154,7 @@ class AgentSDKAgent(BaseAgent):
         self.secrets = secrets
         self.tools = list(tools) if tools else []
         self._max_turns = max_turns
+        self._model = model
 
         # --- System prompt ---
         if system_prompt:
@@ -186,6 +190,8 @@ class AgentSDKAgent(BaseAgent):
             options_kwargs["cwd"] = cwd
         if permission_mode:
             options_kwargs["permission_mode"] = permission_mode
+        if model:
+            options_kwargs["model"] = model
 
         self._options = ClaudeAgentOptions(**options_kwargs)
 
@@ -197,8 +203,8 @@ class AgentSDKAgent(BaseAgent):
 
     @property
     def model(self) -> str:
-        """Model identifier — the SDK manages model selection internally."""
-        return "claude-agent-sdk"
+        """Model identifier — returns the configured model or a default label."""
+        return self._model or "claude-agent-sdk"
 
     @property
     def provider(self) -> str:
@@ -267,7 +273,13 @@ class AgentSDKAgent(BaseAgent):
                 if on_stream:
                     on_stream(text)
 
-        return {"text": "\n".join(texts) if texts else "", "tool_calls": []}
+        # ResultMessage.result often echoes the last AssistantMessage text
+        deduped: list[str] = []
+        for t in texts:
+            if not deduped or t != deduped[-1]:
+                deduped.append(t)
+
+        return {"text": "\n".join(deduped) if deduped else "", "tool_calls": []}
 
     async def _achat_with_client(
         self, message: str, *, on_stream: Callable[[str], None] | None = None
@@ -290,8 +302,15 @@ class AgentSDKAgent(BaseAgent):
                 msg_tool_calls = _extract_tool_calls_from_sdk_message(msg)
                 tool_calls.extend(msg_tool_calls)
 
+        # Filter duplicate text: ResultMessage.result often echoes the last
+        # AssistantMessage text, so deduplicate adjacent identical entries.
+        deduped: list[str] = []
+        for t in texts:
+            if not deduped or t != deduped[-1]:
+                deduped.append(t)
+
         return {
-            "text": "\n".join(texts) if texts else "",
+            "text": "\n".join(deduped) if deduped else "",
             "tool_calls": tool_calls,
         }
 
@@ -302,7 +321,19 @@ class AgentSDKAgent(BaseAgent):
 
 
 def _extract_text_from_sdk_message(msg: Any) -> str:
-    """Extract plain text content from a Claude Agent SDK message."""
+    """Extract plain text content from a Claude Agent SDK message.
+
+    Handles:
+    - ``AssistantMessage`` — ``.content`` is a list of text/tool-use blocks
+    - ``ResultMessage`` — ``.result`` is a plain string (final summary)
+    - ``StreamEvent`` — ignored (no user-visible text)
+    - Plain string ``.content`` — returned directly
+    """
+    # ResultMessage has .result (str | None) — the final output
+    result = getattr(msg, "result", None)
+    if result and isinstance(result, str):
+        return result
+
     # AssistantMessage has .content which is a list of blocks
     content = getattr(msg, "content", None)
     if content is None:

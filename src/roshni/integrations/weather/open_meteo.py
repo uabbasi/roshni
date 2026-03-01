@@ -180,4 +180,3 @@ def fetch_open_meteo_weather(
 
 
 __all__ = ["PACIFIC_TZ", "WEATHER_API_URL", "WEATHER_CODES", "assess_outdoor", "fetch_open_meteo_weather"]
-

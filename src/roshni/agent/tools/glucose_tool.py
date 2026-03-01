@@ -26,4 +26,3 @@ def create_glucose_tools(get_glucose_now_fn: Callable[..., str]) -> list[ToolDef
 
 
 __all__ = ["create_glucose_tools"]
-

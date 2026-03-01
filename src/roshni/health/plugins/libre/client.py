@@ -44,4 +44,3 @@ def get_auth_with_retry(
 
 
 __all__ = ["get_auth_with_retry", "get_cached_auth"]
-

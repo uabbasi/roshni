@@ -242,7 +242,27 @@ def create_tools(config: Config, secrets: SecretsManager) -> list[ToolDefinition
             from .gmail_tool import create_gmail_tools
 
             gmail_tier = get_domain_tier(permissions_cfg, "gmail")
-            tools.extend(create_gmail_tools(config, secrets, tier=gmail_tier))
+
+            # Try OAuth via google_workspace config (credentials_path + token_path)
+            google_oauth = None
+            gws_cfg = integrations.get("google_workspace", {}) or {}
+            creds_path = gws_cfg.get("credentials_path", "")
+            token_path = gws_cfg.get("token_path", "")
+            if gws_cfg.get("enabled") and creds_path and token_path:
+                try:
+                    from roshni.core.auth import ALL_WORKSPACE_SCOPES, GoogleOAuth
+
+                    token_format = gws_cfg.get("token_format", "json")
+                    google_oauth = GoogleOAuth(
+                        credentials_path=creds_path,
+                        token_path=token_path,
+                        scopes=gws_cfg.get("scopes_list") or ALL_WORKSPACE_SCOPES,
+                        token_format=token_format,
+                    )
+                except Exception as e:
+                    logger.warning(f"Gmail OAuth setup failed, falling back to IMAP: {e}")
+
+            tools.extend(create_gmail_tools(config, secrets, tier=gmail_tier, google_oauth=google_oauth))
         except Exception as e:
             logger.warning(f"Could not load Gmail tools: {e}")
             load_failures.append(f"gmail: {e}")
