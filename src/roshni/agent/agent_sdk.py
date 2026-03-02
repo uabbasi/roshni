@@ -181,7 +181,6 @@ class AgentSDKAgent(BaseAgent):
         options_kwargs: dict[str, Any] = {
             "system_prompt": self._system_prompt,
             "max_turns": max_turns,
-            "tools": [],  # Disable Claude Code built-in tools; only MCP tools
         }
         if mcp_servers:
             options_kwargs["mcp_servers"] = mcp_servers
@@ -294,13 +293,10 @@ class AgentSDKAgent(BaseAgent):
             mcp_server = _build_mcp_server(effective_tools)
             allowed_tools = [f"mcp__roshni-tools__{t.name}" for t in effective_tools]
 
-        # Build fresh options.
-        # tools=[] disables Claude Code's built-in tools (web search, bash, file ops)
-        # so the subprocess only uses our MCP tools via allowed_tools.
+        # Build fresh options
         opts: dict[str, Any] = {
             "system_prompt": effective_prompt,
             "max_turns": effective_max_turns,
-            "tools": [],
         }
         if mcp_server is not None:
             opts["mcp_servers"] = {"roshni-tools": mcp_server}
