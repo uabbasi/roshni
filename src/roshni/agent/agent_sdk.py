@@ -231,13 +231,14 @@ class AgentSDKAgent(BaseAgent):
         self._busy.set()
         start = time()
 
+        model_label = self._model or "claude-agent-sdk"
         try:
             result = _run_async(self._achat(message, on_stream=on_stream))
             return ChatResult(
                 text=result["text"],
                 duration=time() - start,
                 tool_calls=result.get("tool_calls", []),
-                model="claude-agent-sdk",
+                model=model_label,
             )
         except Exception as e:
             logger.error(f"AgentSDKAgent error ({type(e).__name__}): {e}")
@@ -245,7 +246,89 @@ class AgentSDKAgent(BaseAgent):
                 text=f"An error occurred: {e}",
                 duration=time() - start,
                 tool_calls=[],
-                model="claude-agent-sdk",
+                model=model_label,
+            )
+        finally:
+            self._busy.clear()
+
+    def chat_once(
+        self,
+        message: str,
+        *,
+        system_prompt: str | None = None,
+        model: str | None = None,
+        tools: list[ToolDefinition] | None = None,
+        max_turns: int | None = None,
+        on_stream: Callable[[str], None] | None = None,
+    ) -> ChatResult:
+        """Single-turn convenience method with per-call overrides.
+
+        Creates fresh ``ClaudeAgentOptions`` per invocation so the caller
+        can inject a different system prompt, model, and tool set each time.
+        This is the integration point for agents like HakimAgent whose system
+        prompt changes per call (advisors inject real-time context).
+
+        Args:
+            message: User message to process.
+            system_prompt: Override system prompt (defaults to init-time prompt).
+            model: Override model (e.g. ``"claude-sonnet-4-6"``).
+            tools: Override tool set (defaults to init-time tools).
+            max_turns: Override max tool-loop turns.
+            on_stream: Optional streaming callback.
+
+        Returns:
+            ChatResult with response text, duration, tool calls, and model used.
+        """
+        from claude_agent_sdk import ClaudeAgentOptions
+
+        effective_tools = tools if tools is not None else self.tools
+        effective_prompt = system_prompt or self._system_prompt
+        effective_model = model or self._model
+        effective_max_turns = max_turns or self._max_turns
+
+        # Build MCP server from the effective tool set
+        mcp_server = None
+        allowed_tools: list[str] = []
+        if effective_tools:
+            mcp_server = _build_mcp_server(effective_tools)
+            allowed_tools = [f"mcp__roshni-tools__{t.name}" for t in effective_tools]
+
+        # Build fresh options
+        opts: dict[str, Any] = {
+            "system_prompt": effective_prompt,
+            "max_turns": effective_max_turns,
+        }
+        if mcp_server is not None:
+            opts["mcp_servers"] = {"roshni-tools": mcp_server}
+        if allowed_tools:
+            opts["allowed_tools"] = allowed_tools
+        if effective_model:
+            opts["model"] = effective_model
+
+        options = ClaudeAgentOptions(**opts)
+
+        self._busy.set()
+        start = time()
+        model_label = effective_model or "claude-agent-sdk"
+
+        try:
+            if effective_tools:
+                result = _run_async(self._achat_with_client(message, on_stream=on_stream, options=options))
+            else:
+                result = _run_async(self._achat_simple(message, on_stream=on_stream, options=options))
+            return ChatResult(
+                text=result["text"],
+                duration=time() - start,
+                tool_calls=result.get("tool_calls", []),
+                model=model_label,
+            )
+        except Exception as e:
+            logger.error(f"AgentSDKAgent.chat_once error ({type(e).__name__}): {e}")
+            return ChatResult(
+                text=f"An error occurred: {e}",
+                duration=time() - start,
+                tool_calls=[],
+                model=model_label,
             )
         finally:
             self._busy.clear()
@@ -260,13 +343,20 @@ class AgentSDKAgent(BaseAgent):
             return await self._achat_with_client(message, on_stream=on_stream)
         return await self._achat_simple(message, on_stream=on_stream)
 
-    async def _achat_simple(self, message: str, *, on_stream: Callable[[str], None] | None = None) -> dict[str, Any]:
+    async def _achat_simple(
+        self,
+        message: str,
+        *,
+        on_stream: Callable[[str], None] | None = None,
+        options: Any | None = None,
+    ) -> dict[str, Any]:
         """Lightweight path using ``query()`` for tool-free interactions."""
         from claude_agent_sdk import query
 
+        effective_options = options or self._options
         texts: list[str] = []
 
-        async for msg in query(prompt=message, options=self._options):
+        async for msg in query(prompt=message, options=effective_options):
             text = _extract_text_from_sdk_message(msg)
             if text:
                 texts.append(text)
@@ -282,15 +372,20 @@ class AgentSDKAgent(BaseAgent):
         return {"text": "\n".join(deduped) if deduped else "", "tool_calls": []}
 
     async def _achat_with_client(
-        self, message: str, *, on_stream: Callable[[str], None] | None = None
+        self,
+        message: str,
+        *,
+        on_stream: Callable[[str], None] | None = None,
+        options: Any | None = None,
     ) -> dict[str, Any]:
         """Full path using ``ClaudeSDKClient`` for tool-bearing interactions."""
         from claude_agent_sdk import ClaudeSDKClient
 
+        effective_options = options or self._options
         texts: list[str] = []
         tool_calls: list[dict[str, Any]] = []
 
-        async with ClaudeSDKClient(options=self._options) as client:
+        async with ClaudeSDKClient(options=effective_options) as client:
             await client.query(message)
             async for msg in client.receive_response():
                 text = _extract_text_from_sdk_message(msg)
