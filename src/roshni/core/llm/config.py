@@ -137,7 +137,9 @@ MODEL_CATALOG: dict[str, list[ModelConfig]] = {
     "gemini": [
         ModelConfig("gemini/gemini-3-flash-preview", "Gemini 3 Flash", "gemini", False, False, 1048576, "low"),
         ModelConfig("gemini/gemini-3.1-pro-preview", "Gemini 3.1 Pro", "gemini", True, False, 1048576, "medium"),
-        ModelConfig("gemini/gemini-2.5-pro", "Gemini 2.5 Pro (Thinking)", "gemini", True, True, 64000, "medium"),
+        ModelConfig(
+            "gemini/gemini-3.1-pro-preview", "Gemini 3.1 Pro (Thinking)", "gemini", True, True, 1048576, "medium"
+        ),
     ],
     "deepseek": [
         ModelConfig("deepseek/deepseek-chat", "DeepSeek Chat", "deepseek", False, False, 8192, "low"),
