@@ -97,7 +97,6 @@ class Config:
             "llm": {
                 "provider": "anthropic",
                 "model": "",
-                "api_key": "",
             },
         }
 

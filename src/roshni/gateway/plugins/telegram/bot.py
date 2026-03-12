@@ -202,7 +202,7 @@ class TelegramGateway(BotGateway):
 
             user_id = update.effective_user.id
             if not gateway._is_authorized(user_id):
-                logger.warning(f"Unauthorized Telegram user: {user_id}")
+                logger.warning("Unauthorized Telegram access attempt")
                 await update.message.reply_text("Not authorized.")
                 return
 
@@ -211,7 +211,8 @@ class TelegramGateway(BotGateway):
                 return
 
             chat_id = str(update.effective_chat.id) if update.effective_chat else str(user_id)
-            logger.info(f"Telegram [{user_id}@{chat_id}]: {message_text[:80]}")
+            logger.info(f"Telegram message received ({len(message_text)} chars)")
+            logger.debug(f"Telegram [{chat_id}]: {message_text[:80]}")
 
             # Typing indicator
             stop_typing = asyncio.Event()

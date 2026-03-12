@@ -86,6 +86,7 @@ class GoogleOAuth:
         try:
             with open(self.token_path, "wb") as f:
                 pickle.dump(creds, f)
+            self.token_path.chmod(0o600)
             logger.debug(f"Token saved to {self.token_path}")
         except Exception as e:
             logger.warning(f"Failed to save pickle token: {e}")
@@ -106,6 +107,7 @@ class GoogleOAuth:
         """Save credentials to a JSON file."""
         try:
             self.token_path.write_text(creds.to_json())
+            self.token_path.chmod(0o600)
             logger.debug(f"Token saved to {self.token_path}")
         except Exception as e:
             logger.warning(f"Failed to save JSON token: {e}")

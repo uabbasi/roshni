@@ -128,6 +128,10 @@ def _check_email(
         return f"Failed to check email: {e}"
 
 
+_send_count: int = 0
+_SEND_LIMIT_PER_SESSION: int = 10
+
+
 def _send_email(
     recipient: str,
     subject: str,
@@ -135,14 +139,19 @@ def _send_email(
     *,
     sender: str = "",
     app_password: str = "",
+    send_limit: int = _SEND_LIMIT_PER_SESSION,
 ) -> str:
-    """Send an email via Gmail SMTP."""
+    """Send an email via Gmail SMTP with per-session rate limiting."""
+    global _send_count
+    if _send_count >= send_limit:
+        return f"Send limit reached ({send_limit} emails this session). Restart to reset."
     from roshni.integrations.gmail import GmailSender
 
     try:
         gmail = GmailSender(sender=sender, app_password=app_password)
         gmail.send(recipient=recipient, subject=subject, html_body=body, text_body=body)
-        return f"Email sent to {recipient}: {subject}"
+        _send_count += 1
+        return f"Email sent to {recipient}: {subject} ({_send_count}/{send_limit} this session)"
     except Exception as e:
         return f"Failed to send email: {e}"
 

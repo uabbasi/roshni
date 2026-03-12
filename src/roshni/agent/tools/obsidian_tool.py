@@ -79,8 +79,10 @@ def _resolve_write_path(vault_path: str, sandbox_dir: str, note_path: str) -> Pa
     else:
         base = vault
     target = (base / note_path).resolve()
-    if not str(target).startswith(str(base)):
-        raise ValueError(f"Path escapes allowed directory: {note_path}")
+    try:
+        target.relative_to(base)
+    except ValueError as e:
+        raise ValueError(f"Path escapes allowed directory: {note_path}") from e
     return target
 
 

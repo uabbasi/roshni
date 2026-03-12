@@ -34,6 +34,7 @@ class ApprovalStore:
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             self._path.write_text(json.dumps(sorted(self._grants), indent=2), encoding="utf-8")
+            self._path.chmod(0o600)
         except Exception as e:
             logger.warning(f"Could not save approval grants to {self._path}: {e}")
 

@@ -131,6 +131,22 @@ def _read_md_file_fuzzy(directory: str, name: str) -> str:
     return _read_md_file(directory, slug)
 
 
+def _sanitize_slug(name: str) -> str:
+    """Sanitize a name into a safe filesystem slug.
+
+    Strips path separators and traversal components to prevent writes
+    outside the target directory.
+    """
+    slug = name.lower().replace(" ", "-")
+    # Remove path separators and null bytes
+    slug = re.sub(r"[/\\:\x00]", "", slug)
+    # Remove any remaining traversal attempts
+    slug = slug.replace("..", "")
+    # Strip leading/trailing dots and dashes
+    slug = slug.strip(".-")
+    return slug or "untitled"
+
+
 def _save_md_file(directory: str, name: str, frontmatter: dict, body: str) -> str:
     """Save a .md file with YAML frontmatter."""
     os.makedirs(directory, exist_ok=True)
@@ -150,7 +166,7 @@ def _save_md_file(directory: str, name: str, frontmatter: dict, body: str) -> st
     lines.append(body)
     content = "\n".join(lines) + "\n"
 
-    slug = name.lower().replace(" ", "-")
+    slug = _sanitize_slug(name)
     path = os.path.join(directory, f"{slug}.md")
     with _vault_write_lock:
         with open(path, "w", encoding="utf-8") as f:
@@ -386,7 +402,7 @@ def create_vault_tools(
 
 def _save_person(vault: VaultManager, name: str, notes: str, tags: list[str] | None, last_contact: str) -> str:
     directory = str(vault.people_dir)
-    slug = name.lower().replace(" ", "-")
+    slug = _sanitize_slug(name)
     path = os.path.join(directory, f"{slug}.md")
 
     if os.path.isfile(path):
@@ -404,7 +420,7 @@ def _save_person(vault: VaultManager, name: str, notes: str, tags: list[str] | N
 
 def _save_project(vault: VaultManager, title: str, notes: str, status: str, tags: list[str] | None) -> str:
     directory = str(vault.projects_dir)
-    slug = title.lower().replace(" ", "-")
+    slug = _sanitize_slug(title)
     path = os.path.join(directory, f"{slug}.md")
 
     if os.path.isfile(path):
@@ -420,7 +436,7 @@ def _save_project(vault: VaultManager, title: str, notes: str, status: str, tags
 
 def _save_idea(vault: VaultManager, title: str, notes: str, tags: list[str] | None) -> str:
     directory = str(vault.ideas_dir)
-    slug = title.lower().replace(" ", "-")
+    slug = _sanitize_slug(title)
     path = os.path.join(directory, f"{slug}.md")
 
     if os.path.isfile(path):

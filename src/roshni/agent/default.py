@@ -1444,7 +1444,8 @@ class DefaultAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     def _should_require_approval(self, tool: ToolDefinition, *, channel: str | None = None) -> bool:
-        if channel and channel in self._auto_approve_channels:
+        # High-risk tools (send, admin) always require approval regardless of channel
+        if channel and channel in self._auto_approve_channels and tool.permission not in {"send", "admin"}:
             return False
         if not (self._require_write_approval and tool.needs_approval()):
             return False
